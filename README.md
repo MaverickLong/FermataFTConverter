@@ -50,6 +50,8 @@ The result is clamped to −1..1. A single key on its own is forwarded directly,
 
 Off by default. With **Bake Exact Shapes** on, the parts of FermataFT's face that native face tracking can reproduce exactly move onto new blendshapes that it drives directly. Everything else keeps running in FermataFT's animator on the forwarded inputs, which stay exactly as described above. Turn the option off to go back to plain forwarding.
 
+The aim is less work for the animator each frame. The bake picks what removes the most blend tree per instruction, folds FermataFT's many clips that set the avatar's own expression shapes to 0 into one, and prunes whatever no longer animates anything.
+
 - **What is baked:** blendshape movements that FermataFT's blend trees compute from tracking through straight-line segments, for example brows, eye wide, squint, smile and sad, cheeks, and, as the instruction budget allows, blink and jaw. Shapes that move together share one baked shape.
 - **Toggles keep working:** the eye and lip tracking toggles, gesture fades, Eye Lid LR Sync and Quest Pro mode still apply to baked shapes. The animator works out their effect and hands it to native face tracking as Blendshapes Set weights.
 - **What is not baked:** 2D blends (eye gaze, tongue direction), shapes another layer also animates, and anything that would pass VRChat's limits (512 instructions, 128 behaviors).

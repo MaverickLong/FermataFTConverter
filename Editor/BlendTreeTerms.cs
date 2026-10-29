@@ -72,6 +72,9 @@ namespace Maberikku.FermataNativeFT.Editor
 
         public VirtualClip Clip => (Tree != null ? Tree.Children[Child].Motion : State.Motion) as VirtualClip;
 
+        /// <summary>Identifies the slot itself, so slots found by different analyses compare equal.</summary>
+        public object Key => Tree != null ? (object)(Tree, Child) : State;
+
         public void SetClip(VirtualClip clip)
         {
             if (Tree == null)
@@ -210,6 +213,20 @@ namespace Maberikku.FermataNativeFT.Editor
             return copy;
         }
 
+        /// <summary>Every clip slot of the state's motion tree, in tree order.</summary>
+        public static IEnumerable<Occurrence> Slots(VirtualState state)
+        {
+            var result = new List<Occurrence>();
+            void Walk(VirtualMotion motion, Occurrence at)
+            {
+                if (motion is VirtualClip) result.Add(at);
+                if (!(motion is VirtualBlendTree tree)) return;
+                for (var i = 0; i < tree.Children.Count; i++) Walk(tree.Children[i].Motion, new Occurrence(tree, i, state));
+            }
+            Walk(state.Motion, new Occurrence(null, -1, state));
+            return result;
+        }
+
         /// <summary>Every parameter the motion's blend trees read.</summary>
         public static IEnumerable<string> Parameters(VirtualMotion motion)
         {
@@ -257,7 +274,8 @@ namespace Maberikku.FermataNativeFT.Editor
             return result;
         }
 
-        static float? ConstantValue(AnimationCurve curve)
+        /// <summary>The curve's value when it never changes; null when it does (or when there is none).</summary>
+        public static float? ConstantValue(AnimationCurve curve)
         {
             if (curve == null || curve.length == 0) return null;
             var keys = curve.keys;
