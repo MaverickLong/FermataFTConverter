@@ -78,19 +78,40 @@ def broken_references(repo, entries):
     return problems
 
 
+def source_date(repo):
+    """The time stamped on every archive entry: $SOURCE_DATE_EPOCH, or the commit time of HEAD."""
+    if os.environ.get("SOURCE_DATE_EPOCH"):
+        return int(os.environ["SOURCE_DATE_EPOCH"])
+    return int(subprocess.run(["git", "-C", repo, "log", "-1", "--format=%ct"], check=True, capture_output=True).stdout)
+
+
 def build(repo, out, entries):
+    # Unity keeps an imported file's archive timestamp, and didn't recompile an assembly whose new scripts were
+    # stamped 1970 (zero). Unity's own exporter stores real times, so every entry gets the commit time: real, newer
+    # for every release, and the same for every build of a commit.
+    mtime = source_date(repo)
+
     def add(tar, name, data):
         info = tarfile.TarInfo(name)
         info.size = len(data)
         info.mode = 0o644
+        info.mtime = mtime
         tar.addfile(info, io.BytesIO(data))
 
+    def add_folder(tar, name):
+        info = tarfile.TarInfo(name)
+        info.type = tarfile.DIRTYPE
+        info.mode = 0o755
+        info.mtime = mtime
+        tar.addfile(info)
+
     os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
-    # No timestamps or file name in the archive, so the same sources always give the same bytes.
+    # No time or file name in the gzip header, so a commit always gives the same bytes.
     with open(out, "wb") as raw, gzip.GzipFile(filename="", fileobj=raw, mode="wb", mtime=0) as gz, \
             tarfile.open(fileobj=gz, mode="w", format=tarfile.USTAR_FORMAT) as tar:
         for asset_path, rel in entries:
             g = guid(asset_path)
+            add_folder(tar, f"{g}/")
             add(tar, f"{g}/pathname", asset_path.encode("utf-8"))
             add(tar, f"{g}/asset.meta", meta(asset_path, rel is None).encode("utf-8"))
             if rel is not None:
