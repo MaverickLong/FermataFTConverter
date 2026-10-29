@@ -29,6 +29,7 @@ If the avatar has no FermataFT face tracking, the bridge warns and does nothing.
 - FermataFT's `_OSCmooth_Binary_Gen` layer, which decoded the bit-packed sync, is removed.
 - FermataFT's `v2/*` sync parameters are removed from the expression parameters. The `v2/*` inputs that OSCmooth reads stay as local (unsynced) parameters.
 - Face tracking is enabled on the avatar descriptor (*Use All Tracking Keys*), with one *Forward to Animator* parameter behavior per input. Each behavior computes the same value VRCFaceTracking would have sent, from VRChat's tracking keys. Every client, local and remote, computes these values itself.
+- Eyes: VRChat derives the gaze and blink tracking keys from its own eye look, which any *Tracking Control* that sets eyes to *Animation* turns off. FermataFT does that whenever its face tracking drives the eyes, and during gestures. Those states set eyes to *Tracking* instead, and the descriptor's *Eye Gaze Mode* and *Eyelids* are set to *Face Tracking*, so VRChat's eye look feeds FermataFT without moving the eye bones or blinking on its own.
 
 Everything else stays as FermataFT built it: OSCmooth smoothing (including its separate local and remote smoothing), the face blend trees, menus, toggles, gestures and their sync. The build checks this and stops if anything else would change.
 
@@ -36,6 +37,7 @@ The avatar's own files are never modified; all changes happen on NDMF's build co
 
 ## Known limits
 
+- With FermataFT's *Eye Tracking* menu toggle off, the eyes stay still and don't blink. Leave it on: without an eye tracker, VRChat's simulated eye movement and blinking drive FermataFT's eyes instead.
 - The remote copy of the face comes from VRChat's native sync, which loses detail with distance.
 - FermataFT reads 30 of VRCFaceTracking's `v2/*` parameters. The formulas for those are checked; the rest of the table is transcribed from VRCFaceTracking and not tested in-game.
 

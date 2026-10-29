@@ -24,6 +24,9 @@ namespace Maberikku.FermataNativeFT.Editor
         /// <summary>OSCmooth smoothing layer. Kept untouched; it now smooths the natively forwarded values.</summary>
         public const string SmoothingLayer = "_OSCmooth_Smoothing_Gen";
 
+        /// <summary>FermataFT's animator flag for "face tracking drives the eyes".</summary>
+        public const string EyeTrackingActiveParameter = "EyeTrackingActive";
+
         /// <summary>VRCFaceTracking parameter namespace that the smoothing layer reads.</summary>
         public const string InputPrefix = "v2/";
 

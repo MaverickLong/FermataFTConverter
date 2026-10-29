@@ -36,6 +36,15 @@ Read from the SDK editor sources and `VRCSDK3A.dll` metadata.
 - Parameter matching: `(?<!(v\d+))(/v2/<Name>)$|^(v2/<Name>)$`, so prefixed names such as `FT/v2/JawOpen` also match.
 - `V2Formulas.cs` restates `UnifiedExpressionsParameters.cs` and `UnifiedSimpleExpressions.cs`. Pupil diameter parameters have no native equivalent.
 
+## Eyes (tested in VRChat, October 2026)
+
+- `EyeLook*` and `EyeClosed*` are the "basic" keys (`IsBasicFaceTrackingKey`; "Gaze/Blink only" in the SDK). VRChat fills them from its own eye look and blink: real eye tracking when available, simulated otherwise. That's why they work without *Use All Tracking Keys*.
+- A Tracking Control with eyes set to *Animation* stops them: with FermataFT's eye tracking on (eyes: Animation), every forwarded `v2/Eye*` value stayed at its default. With it off (eyes: Tracking), they moved. Squint, wide and all mouth keys were unaffected. Changing the Eye Gaze Mode alone did not help.
+- FermataFT locks the eyes in its eye-tracking state, its blink lock, AFK/station, and every gesture expression, including gestures that keep tracked eyes on (`EyeTracking_GestureControl` 0). Under OSC input none of that stopped the tracking data.
+- Fix: when FermataFT's eye-tracking state locks the eyes (it sets `EyeTrackingActive`, or is only entered while it's on), every eye lock becomes *Tracking*, and the descriptor's Eye Gaze Mode and Eyelids become *Face Tracking*. With no Blendshapes Set mapping, VRChat's eye look then has no visible effect; it only feeds the keys. Mouth locks stay, since they also control visemes.
+- Cost: with FermataFT's eye tracking toggle off, eyes no longer fall back to VRChat's bone gaze and descriptor blink; they stay still.
+- Pawlygon's native setup takes a different route: it maps the eye keys to blendshapes natively, sets Eye Gaze Mode Both/Face Tracking and Eyelids Face Tracking, and uses no Tracking Control. Its `v2/*` forwarding formulas match `V2Formulas.cs`.
+
 ## NDMF 1.15 / Modular Avatar 1.19
 
 - MA's `nadena.dev.modular-avatar.late-transform-stages` plugin destroys every `AvatarTagComponent`. FermataFT's `ftSet` is one, so the pass must run before that plugin.
@@ -55,8 +64,11 @@ Installer packages for 15 avatars (Chocolat, Airi, Chiffon, Eku, Kaguya, Karin, 
 
 ## Still to verify in VRChat
 
-1. Forwarded values reach the animator, locally and on a remote client. Then check whether the unsynced declarations are needed at all.
-2. Resting face with no tracker connected (eyelids should stay open at the default).
-3. Remote smoothness: OSCmooth's remote branch smooths more heavily than the local one, as it always did.
-4. Built-in eye look, blink and visemes behave as before when face tracking is enabled on the descriptor.
-5. Performance stats: Face Tracking Operations and Forwarded Parameters (30).
+Verified so far: forwarded values reach the animator locally (mouth, tongue; eyes with FermataFT's eye tracking toggle off).
+
+1. Eyes with the eye-lock fix: gaze, blink, squint and JellyEye with the toggle on; gaze during gestures; no extra bone gaze or descriptor blink.
+2. A remote client. Then check whether the unsynced declarations are needed at all.
+3. Resting face with no tracker connected; simulated gaze and blink should drive FermataFT's eyes.
+4. Remote smoothness: OSCmooth's remote branch smooths more heavily than the local one, as it always did.
+5. Visemes behave as before.
+6. Performance stats: Face Tracking Operations and Forwarded Parameters (30).

@@ -8,6 +8,7 @@ using UnityEditor.Animations;
 using UnityEngine;
 using VRC.SDK3.Avatars.Components;
 using VRC.SDK3.Avatars.ScriptableObjects;
+using VRC.SDKBase;
 using Object = UnityEngine.Object;
 
 [assembly: ExportsPlugin(typeof(FermataNativeFTPlugin))]
@@ -98,6 +99,7 @@ namespace Maberikku.FermataNativeFT.Editor
             DeclareInputs(fx, plan);
             var (bitsBefore, bitsAfter, removed) = UpdateExpressionParameters(context, descriptor, fx, plan);
             AddBehaviors(descriptor, plan);
+            KeepEyesTracked(descriptor, plan);
 
             var problems = new List<string>();
             CheckLayers(fx, expectedLayers, problems);
@@ -118,7 +120,42 @@ namespace Maberikku.FermataNativeFT.Editor
                 $"Native face tracking now drives {plan.Targets.Count} FermataFT inputs ({custom} custom expressions, " +
                 $"about {plan.ExistingInstructions + plan.NewInstructions}/{NativeExpression.MaxInstructions} instructions). " +
                 $"Removed FX layer '{FermataProfile.BinaryDecodeLayer}' and {removed.Count} sync parameters; " +
-                $"synced bits {bitsBefore} -> {bitsAfter}. OSCmooth smoothing and all other FermataFT settings are unchanged.");
+                $"synced bits {bitsBefore} -> {bitsAfter}. " +
+                (plan.UnlockEyes
+                    ? $"Eye input stays on in {plan.EyeLockStates.Count} states that locked the eyes, " +
+                      "with Eye Gaze Mode and Eyelids set to Face Tracking. "
+                    : "") +
+                "OSCmooth smoothing and all other FermataFT settings are unchanged.");
+        }
+
+        /// <summary>
+        /// VRChat produces the gaze and blink tracking keys from its own eye look, which every Tracking Control
+        /// "eyes: Animation" stops. FermataFT uses those locks while its face tracking drives the eyes and during
+        /// gestures; with OSC input they never stopped the tracking data. So every lock becomes "eyes: Tracking",
+        /// and VRChat's eye look is routed to face tracking only, so it neither turns the eye bones nor blinks on top of
+        /// FermataFT. With FermataFT's eye tracking off, the eyes therefore stay still.
+        /// </summary>
+        static void KeepEyesTracked(VRCAvatarDescriptor descriptor, PatchPlan plan)
+        {
+            if (!plan.UnlockEyes) return;
+            foreach (var (_, _, s, _) in plan.EyeLockStates)
+            {
+                var state = (VirtualState)s;
+                var behaviours = state.Behaviours;
+                foreach (var control in behaviours.OfType<VRCAnimatorTrackingControl>()
+                             .Where(c => c && c.trackingEyes == VRC_AnimatorTrackingControl.TrackingType.Animation).ToList())
+                {
+                    var copy = Object.Instantiate(control);
+                    copy.name = control.name;
+                    copy.trackingEyes = VRC_AnimatorTrackingControl.TrackingType.Tracking;
+                    behaviours = behaviours.Replace(control, copy);
+                }
+                state.Behaviours = behaviours;
+            }
+
+            descriptor.enableEyeLook = true;
+            descriptor.customEyeLookSettings.eyeGazeMode = VRCAvatarDescriptor.CustomEyeLookSettings.EyeGazeMode.FaceTracking;
+            descriptor.customEyeLookSettings.eyelidType = VRCAvatarDescriptor.EyelidType.FaceTracking;
         }
 
         /// <summary>Makes sure every forwarded input exists as a float in the FX controller.</summary>

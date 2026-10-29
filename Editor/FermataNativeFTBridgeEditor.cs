@@ -73,6 +73,15 @@ namespace Maberikku.FermataNativeFT.Editor
                     "FermataFT settings stay as they are.",
                     MessageType.Info);
 
+                if (plan.UnlockEyes)
+                {
+                    EditorGUILayout.HelpBox(
+                        $"For native eye tracking, the {plan.EyeLockStates.Count} animator states that lock the eyes " +
+                        "(FermataFT's eye tracking and gesture states) keep VRChat's eye input on, and the avatar's Eye Gaze " +
+                        "Mode and Eyelids are set to Face Tracking. With FermataFT's Eye Tracking menu toggle off, the eyes stay still.",
+                        MessageType.Info);
+                }
+
                 _showTargets = EditorGUILayout.Foldout(_showTargets, "Forwarded inputs", true);
                 if (_showTargets)
                 {

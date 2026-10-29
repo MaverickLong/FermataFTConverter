@@ -86,6 +86,17 @@ namespace Maberikku.FermataNativeFT.Editor
         /// <summary>Parameters that only the binary decode layer reads: Fermata's bit-packed sync, which goes away with it.</summary>
         public readonly HashSet<string> DecodeOnlyParameters = new HashSet<string>(StringComparer.Ordinal);
 
+        /// <summary>States whose Tracking Control hands the eyes to animation, in every remaining layer.</summary>
+        public readonly List<(LayerInfo Layer, string Name, object State, bool TurnsEyeTrackingOn)> EyeLockStates =
+            new List<(LayerInfo, string, object, bool)>();
+
+        /// <summary>
+        /// VRChat produces the gaze and blink tracking keys from its own eye look, which every eye lock stops. FermataFT
+        /// locks the eyes whenever its face tracking drives them, so they must all stay on tracking instead, with VRChat's
+        /// own eye look routed to face tracking so it has no visible effect of its own.
+        /// </summary>
+        public bool UnlockEyes => EyeLockStates.Any(s => s.TurnsEyeTrackingOn);
+
         public int ExistingBehaviors;
         public int ExistingInstructions;
 
@@ -156,6 +167,10 @@ namespace Maberikku.FermataNativeFT.Editor
             foreach (var parameter in plan.BinaryLayer.Reads)
                 if (!keptReads.Contains(parameter))
                     plan.DecodeOnlyParameters.Add(parameter);
+
+            foreach (var layer in kept)
+            foreach (var (name, state, turnsOn) in layer.EyeLockStates)
+                plan.EyeLockStates.Add((layer, name, state, turnsOn));
 
             CheckDescriptor(plan, descriptor);
             return plan;
