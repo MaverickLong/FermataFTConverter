@@ -39,6 +39,18 @@ The avatar's own files are never modified; all changes happen on NDMF's build co
 - The remote copy of the face comes from VRChat's native sync, which loses detail with distance.
 - FermataFT reads 30 of VRCFaceTracking's `v2/*` parameters. The formulas for those are checked; the rest of the table is transcribed from VRCFaceTracking and not tested in-game.
 
+## Building
+
+CI builds `FermataNativeFT-<version>.unitypackage` on every push. For `v*` tags it also attaches the package to a GitHub release. The package contains everything in this folder except this README and the repository plumbing.
+
+To build locally:
+
+```
+python .github/scripts/build_unitypackage.py --out <outside Assets>/FermataNativeFT.unitypackage
+```
+
+The repository does not track Unity `.meta` files. Each asset's GUID is the MD5 of its Unity path, so a file keeps its GUID across releases and an update replaces it in place. Renaming or moving a file gives it a new GUID. In a Unity checkout, run the script with `--sync-metas` after adding, renaming or moving files, so the project uses the same GUIDs as the package.
+
 ## License
 
 MIT, see [LICENSE](LICENSE).
