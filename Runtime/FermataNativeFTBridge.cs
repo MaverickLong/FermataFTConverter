@@ -30,6 +30,8 @@ namespace Maberikku.FermataNativeFT
         [Tooltip("Replaces the expression of a forwarded FermataFT input with the same name, or forwards another animator parameter.")]
         public List<CustomForward> customForwards = new List<CustomForward>();
 
+        // Not wired up for now: the build ignores it and the inspector doesn't show it (see NOTES.md, Shape bake).
+        [HideInInspector]
         [Tooltip("Experimental. Moves the parts of FermataFT's face that native face tracking can reproduce exactly onto " +
                  "baked blendshapes it drives directly. Everything else keeps using the forwarded inputs.")]
         public bool bakeExactShapes;

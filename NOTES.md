@@ -4,7 +4,7 @@ Facts this tool relies on, where they were verified, and what is still open. Che
 
 ## Design
 
-- Scope: a stopgap. FermataFT's face blend tree stays in the animator; compiling all of it to native face tracking was prototyped and abandoned (it does not fit the 512-instruction budget). The optional shape bake (below) moves only the exactly reproducible parts.
+- Scope: a stopgap. FermataFT's face blend tree stays in the animator; compiling all of it to native face tracking was prototyped and abandoned (it does not fit the 512-instruction budget). The shape bake (below) is kept in the code but not wired up.
 - One NDMF pass, triggered by the `FermataNativeFTBridge` marker, patches the build copy after Modular Avatar has merged FermataFT:
   1. Remove the `_OSCmooth_Binary_Gen` FX layer (decodes the bit-packed sync).
   2. Keep `_OSCmooth_Smoothing_Gen` untouched. Its `v2/*` inputs are now written by native *Forward to Animator* behaviors, on every client.
@@ -24,9 +24,11 @@ Facts this tool relies on, where they were verified, and what is still open. Che
 - Custom expressions (`FermataNativeFTBridge.customForwards`) replace a built-in formula by parameter name, add extra forwards, or fill in `v2/*` inputs without a built-in formula. The UI follows Pawlygon's Face Tracking Parameters design (override button, `+` input picker, `ƒ` function menu, inserting at the cursor). Pawlygon's VRC-Facetracking is MIT; see `THIRD_PARTY_NOTICES.md`.
 - `NativeExpression.Check` parses expressions with the SDK's documented rules: syntax, known inputs, function arities, 512 characters, 128 tokens, 64 instructions, nesting and stack depth 16, numbers up to ±10000. The inspector and the build share it; an invalid custom expression is a build error.
 
-## Shape bake (experimental, off by default)
+## Shape bake (not wired up)
 
-`bakeExactShapes` on the marker. It runs after forwarding, which always stays: whatever isn't baked keeps running in the animator on the forwarded inputs, and turning the option off gives plain forwarding again.
+Kept in the code (`ShapeBake.Run`) but not wired up: the build doesn't call it, and the inspector doesn't show `bakeExactShapes`. For now the bridge keeps OSCmooth and FermataFT's blend trees, and only zero folding changes the face layer. The rest of this section describes the bake as written.
+
+It runs after forwarding, which always stays: whatever isn't baked keeps running in the animator on the forwarded inputs, and turning the option off gives plain forwarding again.
 
 - Analysis (`BlendTreeTerms`): a single-state, Write Defaults, override layer at weight 1 with no mask, no transitions and no layer control is rewritten per blendshape as a sum of terms, coefficient × product of single-parameter factors.
   - A Direct child multiplies by its parameter.
@@ -114,9 +116,4 @@ Verified so far: forwarded values reach the animator locally (mouth, tongue; eye
 4. Remote smoothness: OSCmooth's remote branch smooths more heavily than the local one, as it always did.
 5. Visemes behave as before.
 6. Performance stats: Face Tracking Operations and Forwarded Parameters (30).
-7. Shape bake: what Chocolat bakes (NDMF console summary, details in the Unity console). Then in VRChat:
-   - baked shapes move like before;
-   - set weights follow the eye/lip tracking toggles, gestures, LR sync and QPro;
-   - remote clients run the set-weight state behaviour;
-   - the self-check passes;
-   - AAO keeps the baked shapes.
+7. Zero folding: the build passes its self-check on Chocolat and Plum, and gestures and expressions look the same as without the bridge, especially mouth gestures with the mouth open.

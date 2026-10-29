@@ -129,8 +129,9 @@ namespace Maberikku.FermataNativeFT.Editor
             var allControllers = controllers.Values.Where(c => c != null).Distinct().ToList();
             var survey = ShapeBake.Look(fx, allControllers, plan);
             ShapeBake.Fold(context.AvatarRootTransform, fx, survey);
-            if (markers.Any(m => m.bakeExactShapes))
-                ShapeBake.Run(context, fx, survey, plan, descriptor, allControllers);
+            // The shape bake is kept but not wired up for now: OSCmooth and FermataFT's blend trees stay as they are.
+            // if (markers.Any(m => m.bakeExactShapes))
+            //     ShapeBake.Run(context, fx, survey, plan, descriptor, allControllers);
 
             // The SDK only validates the scene avatar, never the behaviors added here, so surface its warnings now.
             foreach (var warning in FaceTrackingExpressionValidator.CollectWarnings(descriptor))
