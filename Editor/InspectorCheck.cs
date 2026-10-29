@@ -43,9 +43,12 @@ namespace Maberikku.FermataNativeFT.Editor
             }
 
             var markers = descriptor.GetComponentsInChildren<FermataNativeFTBridge>(true)
-                .Count(m => m.GetComponentInParent<VRCAvatarDescriptor>(true) == descriptor);
-            if (markers > 1)
-                report.Findings.Add(new Finding(Severity.Info, $"This avatar has {markers} {Messages.Title} components (one is enough)."));
+                .Where(m => m.GetComponentInParent<VRCAvatarDescriptor>(true) == descriptor)
+                .ToList();
+            if (markers.Count > 1)
+                report.Findings.Add(new Finding(Severity.Info, $"This avatar has {markers.Count} {Messages.Title} components (one is enough)."));
+            if (markers.Count(m => m.customForwards != null && m.customForwards.Count > 0) > 1)
+                report.Findings.Add(new Finding(Severity.Error, $"Several {Messages.Title} components have custom expressions (keep them on one)."));
 
             var settings = FermataProfile.FindSettings(descriptor);
             if (settings.Count > 1)
@@ -67,7 +70,7 @@ namespace Maberikku.FermataNativeFT.Editor
                     "(an older install that edited the FX directly). Those layers will be patched."));
             }
 
-            report.Plan = PatchPlanner.Plan(fxLayers, Enumerable.Empty<LayerInfo>(), descriptor);
+            report.Plan = PatchPlanner.Plan(fxLayers, Enumerable.Empty<LayerInfo>(), descriptor, marker.customForwards, seesAllLayers: false);
             report.Findings.AddRange(report.Plan.Findings);
             if (!report.Plan.HasErrors) report.SyncedBitsFreed = EstimateFreedBits(descriptor, report.Plan);
             return report;

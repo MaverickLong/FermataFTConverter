@@ -35,6 +35,17 @@ Everything else stays as FermataFT built it: OSCmooth smoothing (including its s
 
 The avatar's own files are never modified; all changes happen on NDMF's build copy.
 
+## Custom expressions
+
+Each forwarded input is a native face tracking expression that VRChat evaluates on every client. To change one, open **Forwarded inputs** in the bridge's inspector and click **Override**. To forward another animator parameter, click **Add** under **Custom Expressions**. An entry with the same name as a forwarded input replaces its built-in formula. It can also supply the formula for a `v2/*` input that has no built-in formula.
+
+Expressions can use:
+
+- tracking key names such as `JawOpen` or `EyeLookInLeft` (the **+** button lists them), `Voice`, and `Viseme_*` (needs LipSync Mode *Viseme BlendShape Face Tracking*)
+- numbers, `+ - * /`, `abs(x)`, `min(a, b)`, `max(a, b)` and `clamp(x, low, high)` (the **ƒ** button inserts them)
+
+The result is clamped to −1..1. A single key on its own is forwarded directly, clamped to 0..1, and costs no instructions. VRChat allows 512 characters, 128 tokens and 64 instructions per expression, and 512 instructions per avatar. The inspector checks each expression as you type. An invalid expression stops the upload with an error.
+
 ## Known limits
 
 - With FermataFT's *Eye Tracking* menu toggle off, the eyes stay still and don't blink. Leave it on: without an eye tracker, VRChat's simulated eye movement and blinking drive FermataFT's eyes instead.
@@ -57,5 +68,5 @@ The repository does not track Unity `.meta` files. Each asset's GUID is the MD5 
 
 MIT, see [LICENSE](LICENSE).
 
-The `v2/*` formulas restate VRCFaceTracking's parameter definitions ([VRCFaceTracking](https://github.com/benaclejames/VRCFaceTracking), Apache-2.0).
+This project follows many designs of [Pawlygon VRC Face Tracking](https://github.com/PawlygonStudio/VRC-Facetracking) (MIT), including the custom expression editor. The `v2/*` formulas restate VRCFaceTracking's parameter definitions ([VRCFaceTracking](https://github.com/benaclejames/VRCFaceTracking), Apache-2.0). See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 FermataFT is a product of FermataShop / CPMEDIA and is not included or redistributed here.

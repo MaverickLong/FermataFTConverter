@@ -14,6 +14,8 @@ Facts this tool relies on, where they were verified, and what is still open. Che
 - Forward targets are discovered, not hard-coded: every `v2/*` parameter that a remaining layer reads.
 - `PatchPlanner` holds every check and is shared by the inspector (on the original controllers) and the build (on NDMF virtual controllers).
 - FermataFT is detected by its `ftSet` component (matched by type name) or by the OSCmooth layers in FX, which covers older installs that edited the avatar FX directly.
+- Custom expressions (`FermataNativeFTBridge.customForwards`) replace a built-in formula by parameter name, add extra forwards, or fill in `v2/*` inputs without a built-in formula. The UI follows Pawlygon's Face Tracking Parameters design (override button, `+` input picker, `ƒ` function menu, inserting at the cursor). Pawlygon's VRC-Facetracking is MIT; see `THIRD_PARTY_NOTICES.md`.
+- `NativeExpression.Check` parses expressions with the SDK's documented rules: syntax, known inputs, function arities, 512 characters, 128 tokens, 64 instructions, nesting and stack depth 16, numbers up to ±10000. The inspector and the build share it; an invalid custom expression is a build error.
 
 ## VRChat SDK (Avatars 3.10.6-beta.4)
 

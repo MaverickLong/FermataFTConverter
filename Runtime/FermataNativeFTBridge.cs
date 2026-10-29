@@ -1,8 +1,22 @@
+using System;
+using System.Collections.Generic;
 using UnityEngine;
 using VRC.SDKBase;
 
 namespace Maberikku.FermataNativeFT
 {
+    /// <summary>A native face tracking expression forwarded to an animator parameter in place of the built-in one.</summary>
+    [Serializable]
+    public sealed class CustomForward
+    {
+        [Tooltip("Animator parameter that receives the value, for example v2/JawOpen.")]
+        public string parameter = "";
+
+        [Tooltip("Tracking keys, Voice and Viseme_* inputs combined with + - * / abs() min() max() clamp(), " +
+                 "for example JawRight - JawLeft. The result is clamped to -1..1.")]
+        public string expression = "";
+    }
+
     /// <summary>
     /// Marks an avatar whose FermataFT setup should run on VRChat native face tracking.
     /// At upload, native tracking values are forwarded into the inputs of Fermata's OSCmooth smoothing layer,
@@ -13,5 +27,7 @@ namespace Maberikku.FermataNativeFT
     [HelpURL("https://github.com/MaverickLong/FermataFTConverter")]
     public sealed class FermataNativeFTBridge : MonoBehaviour, IEditorOnly
     {
+        [Tooltip("Replaces the expression of a forwarded FermataFT input with the same name, or forwards another animator parameter.")]
+        public List<CustomForward> customForwards = new List<CustomForward>();
     }
 }

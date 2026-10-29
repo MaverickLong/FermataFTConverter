@@ -24,25 +24,36 @@ namespace Maberikku.FermataNativeFT.Editor
         }
     }
 
-    /// <summary>One FermataFT input that native face tracking will drive.</summary>
+    /// <summary>One animator parameter that native face tracking will drive.</summary>
     internal sealed class ForwardTarget
     {
         /// <summary>Animator parameter written by the behavior, e.g. "v2/JawOpen".</summary>
         public readonly string Parameter;
 
+        /// <summary>The expression that will run: the custom one if there is one, otherwise the built-in formula.</summary>
         public readonly string Expression;
+
+        /// <summary>The built-in formula, or null when only a custom expression forwards this parameter.</summary>
+        public readonly string BuiltIn;
+
+        public readonly bool IsCustom;
 
         /// <summary>Set when the expression is a bare tracking key; it is then forwarded with combine mode Max and costs no instructions.</summary>
         public readonly string SingleKey;
 
         public readonly int Instructions;
+        public readonly IReadOnlyList<string> Inputs;
 
-        public ForwardTarget(string parameter, string expression)
+        public ForwardTarget(string parameter, string expression, string builtIn, bool isCustom)
         {
             Parameter = parameter;
-            Expression = expression;
-            SingleKey = NativeExpression.IsSingleKey(expression) ? expression.Trim() : null;
-            Instructions = SingleKey != null ? 0 : NativeExpression.CountInstructions(expression);
+            Expression = expression.Trim();
+            BuiltIn = builtIn;
+            IsCustom = isCustom;
+            var check = NativeExpression.Check(Expression);
+            Inputs = check.Inputs;
+            SingleKey = NativeExpression.IsSingleKey(Expression) ? Expression : null;
+            Instructions = SingleKey != null ? 0 : check.Instructions;
         }
 
         public VRCAvatarDescriptor.FaceTrackingParameterBehavior ToBehavior()
@@ -104,6 +115,7 @@ namespace Maberikku.FermataNativeFT.Editor
         public int NewInstructions => Targets.Sum(t => t.Instructions);
 
         public void Error(string message) => Findings.Add(new Finding(Severity.Error, message));
+        public void Warning(string message) => Findings.Add(new Finding(Severity.Warning, message));
     }
 
     /// <summary>
@@ -114,7 +126,10 @@ namespace Maberikku.FermataNativeFT.Editor
     {
         /// <param name="fxLayers">All layers of the merged FX controller, in order.</param>
         /// <param name="otherLayers">Layers of the other playable controllers.</param>
-        public static PatchPlan Plan(IReadOnlyList<LayerInfo> fxLayers, IEnumerable<LayerInfo> otherLayers, VRCAvatarDescriptor descriptor)
+        /// <param name="customForwards">The bridge's custom expressions.</param>
+        /// <param name="seesAllLayers">False when only the FX layers were scanned, as in the inspector.</param>
+        public static PatchPlan Plan(IReadOnlyList<LayerInfo> fxLayers, IEnumerable<LayerInfo> otherLayers, VRCAvatarDescriptor descriptor,
+            IEnumerable<CustomForward> customForwards, bool seesAllLayers)
         {
             var plan = new PatchPlan();
             plan.BinaryLayer = FindLayer(fxLayers, FermataProfile.BinaryDecodeLayer, plan);
@@ -123,28 +138,47 @@ namespace Maberikku.FermataNativeFT.Editor
 
             var kept = fxLayers.Where(l => l != plan.BinaryLayer).Concat(otherLayers).ToList();
             var keptReads = new HashSet<string>(kept.SelectMany(l => l.Reads), StringComparer.Ordinal);
+            var custom = ResolveCustom(customForwards, plan);
 
             // Every v2 input still read after the binary layer is gone must be driven natively.
-            var unknown = new List<string>();
-            foreach (var parameter in keptReads.Where(p => p.StartsWith(FermataProfile.InputPrefix, StringComparison.Ordinal))
-                         .OrderBy(p => p, StringComparer.Ordinal))
+            var detected = keptReads.Where(p => p.StartsWith(FermataProfile.InputPrefix, StringComparison.Ordinal))
+                .OrderBy(p => p, StringComparer.Ordinal).ToList();
+            foreach (var parameter in detected)
             {
-                var v2Name = parameter.Substring(FermataProfile.InputPrefix.Length);
-                if (!V2Formulas.TryGet(v2Name, out var expression))
+                V2Formulas.TryGet(parameter.Substring(FermataProfile.InputPrefix.Length), out var builtIn);
+                if (custom.TryGetValue(parameter, out var expression))
                 {
-                    unknown.Add(parameter);
-                    continue;
+                    plan.Targets.Add(new ForwardTarget(parameter, expression, builtIn, true));
                 }
-                var badInputs = NativeExpression.Inputs(expression).Where(i => !NativeExpression.TrackingKeys.Contains(i)).ToList();
-                if (badInputs.Count > 0)
+                else if (builtIn == null)
                 {
-                    plan.Error($"Internal error: the formula for '{parameter}' uses unknown tracking keys: {string.Join(", ", badInputs)}.");
-                    continue;
+                    plan.Error($"'{parameter}' is read by {ReadersOf(parameter, kept)}, but there is no built-in formula for it. Add a custom expression for it.");
                 }
-                plan.Targets.Add(new ForwardTarget(parameter, expression));
+                else if (!NativeExpression.Check(builtIn).IsValid)
+                {
+                    plan.Error($"Internal error: the built-in formula for '{parameter}' is invalid: {string.Join(" ", NativeExpression.Check(builtIn).Errors)}");
+                }
+                else
+                {
+                    plan.Targets.Add(new ForwardTarget(parameter, builtIn, builtIn, false));
+                }
             }
-            foreach (var parameter in unknown)
-                plan.Error($"'{parameter}' is read by {ReadersOf(parameter, kept)}, but there is no native face tracking formula for it.");
+
+            // Custom expressions for parameters FermataFT doesn't read are extra forwards, e.g. for the avatar's own animators.
+            foreach (var pair in custom.Where(c => !detected.Contains(c.Key)).OrderBy(c => c.Key, StringComparer.Ordinal))
+            {
+                var builtIn = pair.Key.StartsWith(FermataProfile.InputPrefix, StringComparison.Ordinal)
+                              && V2Formulas.TryGet(pair.Key.Substring(FermataProfile.InputPrefix.Length), out var formula)
+                    ? formula
+                    : null;
+                plan.Targets.Add(new ForwardTarget(pair.Key, pair.Value, builtIn, true));
+                if (seesAllLayers && !keptReads.Contains(pair.Key))
+                    plan.Warning($"No animator layer reads '{pair.Key}', so its custom expression only adds a forwarded parameter.");
+            }
+
+            if (descriptor.lipSync != VRC.SDKBase.VRC_AvatarDescriptor.LipSyncStyle.VisemeBlendShapeFaceTracking)
+                foreach (var target in plan.Targets.Where(t => t.Inputs.Any(NativeExpression.IsViseme)))
+                    plan.Warning($"The expression for '{target.Parameter}' reads visemes, which only have values with LipSync Mode 'Viseme BlendShape Face Tracking'.");
 
             // Nothing that stays may animate a forwarded input, or it would fight the native value.
             foreach (var layer in kept)
@@ -184,6 +218,37 @@ namespace Maberikku.FermataNativeFT.Editor
                 ? $"FermataFT's FX layer '{name}' was not found. This FermataFT version or layout is not supported."
                 : $"FermataFT's FX layer '{name}' appears {matches.Count} times; it must appear exactly once. Check for duplicated FermataFT prefabs.");
             return null;
+        }
+
+        /// <summary>Valid custom expressions by parameter. Rows left completely blank are ignored; anything else invalid is an error.</summary>
+        static Dictionary<string, string> ResolveCustom(IEnumerable<CustomForward> customForwards, PatchPlan plan)
+        {
+            var custom = new Dictionary<string, string>(StringComparer.Ordinal);
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var entry in customForwards ?? Enumerable.Empty<CustomForward>())
+            {
+                var name = entry?.parameter?.Trim() ?? "";
+                var expression = entry?.expression?.Trim() ?? "";
+                if (name.Length == 0 && expression.Length == 0) continue;
+                if (name.Length == 0)
+                {
+                    plan.Error($"The custom expression '{expression}' has no parameter name.");
+                    continue;
+                }
+                if (!seen.Add(name))
+                {
+                    plan.Error($"'{name}' has more than one custom expression; keep one.");
+                    continue;
+                }
+                var check = NativeExpression.Check(expression);
+                if (!check.IsValid)
+                {
+                    plan.Error($"The custom expression for '{name}' is invalid: {string.Join(" ", check.Errors)}");
+                    continue;
+                }
+                custom[name] = expression;
+            }
+            return custom;
         }
 
         static string ReadersOf(string parameter, IEnumerable<LayerInfo> layers)

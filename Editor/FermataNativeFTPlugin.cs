@@ -45,7 +45,7 @@ namespace Maberikku.FermataNativeFT.Editor
             if (markers.Length == 0) return;
             try
             {
-                Patch(context);
+                Patch(context, markers);
             }
             finally
             {
@@ -54,7 +54,7 @@ namespace Maberikku.FermataNativeFT.Editor
             }
         }
 
-        static void Patch(BuildContext context)
+        static void Patch(BuildContext context, FermataNativeFTBridge[] markers)
         {
             var descriptor = context.AvatarRootObject.GetComponent<VRCAvatarDescriptor>();
             var controllers = context.Extension<AnimatorServicesContext>().ControllerContext.Controllers;
@@ -76,7 +76,11 @@ namespace Maberikku.FermataNativeFT.Editor
                 .Where(kv => kv.Value != null && kv.Value != fx)
                 .SelectMany(kv => kv.Value.Layers.Select(l => AnimatorScan.Scan(l, kv.Key.ToString())))
                 .ToList();
-            var plan = PatchPlanner.Plan(fxLayers, otherLayers, descriptor);
+            var withCustom = markers.Where(m => m.customForwards != null && m.customForwards.Count > 0).ToList();
+            var plan = PatchPlanner.Plan(fxLayers, otherLayers, descriptor,
+                withCustom.FirstOrDefault()?.customForwards, seesAllLayers: true);
+            if (withCustom.Count > 1)
+                plan.Error($"{withCustom.Count} {Messages.Title} components have custom expressions. Keep them on one.");
 
             if (descriptor.expressionParameters == null)
                 plan.Error("The avatar has no Expression Parameters after Modular Avatar ran.");
@@ -84,6 +88,8 @@ namespace Maberikku.FermataNativeFT.Editor
                 if (fx.Parameters.TryGetValue(target.Parameter, out var p) && p.type != AnimatorControllerParameterType.Float)
                     plan.Error($"FX parameter '{target.Parameter}' is a {p.type}; native face tracking can only forward floats.");
 
+            foreach (var finding in plan.Findings.Where(f => f.Severity == Severity.Warning))
+                BridgeError.Report(ErrorSeverity.NonFatal, finding.Message);
             if (plan.HasErrors)
             {
                 foreach (var finding in plan.Findings.Where(f => f.Severity == Severity.Error))
