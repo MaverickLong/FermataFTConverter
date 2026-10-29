@@ -1,0 +1,8 @@
+# Unity .meta files are generated with path-derived GUIDs by .github/scripts/build_unitypackage.py.
+*.meta
+
+# Local research material. It is derived from FermataFT and must never be committed.
+_Local~/
+
+# Package builds
+dist/

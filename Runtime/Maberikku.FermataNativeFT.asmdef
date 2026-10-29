@@ -1,0 +1,8 @@
+{
+  "name": "Maberikku.FermataNativeFT",
+  "rootNamespace": "Maberikku.FermataNativeFT",
+  "references": [
+    "VRC.SDKBase"
+  ],
+  "autoReferenced": true
+}
