@@ -21,8 +21,8 @@ import tarfile
 
 PACKAGE_ROOT = "Assets/Maberikku/FermataFTConverter"
 
-# Repository files that are not part of the package. README is distributed separately.
-EXCLUDE = re.compile(r"^(README\.md|\.gitignore|\.gitattributes|\.github/.*|.*\.meta)$")
+# Repository files that are not part of the package. README is distributed separately; NOTES is for developers.
+EXCLUDE = re.compile(r"^(README\.md|NOTES\.md|\.gitignore|\.gitattributes|\.github/.*|.*\.meta)$")
 
 # Assets whose YAML may reference other assets by GUID.
 YAML_ASSETS = (".prefab", ".asset", ".controller", ".overrideController", ".anim", ".mask", ".mat", ".unity")

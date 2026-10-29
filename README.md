@@ -41,7 +41,7 @@ The avatar's own files are never modified; all changes happen on NDMF's build co
 
 ## Building
 
-CI builds `FermataNativeFT-<version>.unitypackage` on every push. For `v*` tags it also attaches the package to a GitHub release. The package contains everything in this folder except this README and the repository plumbing.
+CI builds `FermataNativeFT-<version>.unitypackage` on every push. For `v*` tags it also attaches the package to a GitHub release. The package contains everything in this folder except this README, `NOTES.md` and the repository plumbing.
 
 To build locally:
 
