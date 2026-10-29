@@ -9,6 +9,7 @@ using UnityEditor;
 using UnityEditor.Animations;
 using UnityEngine;
 using VRC.SDK3.Avatars.Components;
+using VRC.SDK3.Avatars.ScriptableObjects;
 using VRC.SDKBase;
 using Object = UnityEngine.Object;
 
@@ -127,8 +128,10 @@ namespace Maberikku.FermataNativeFT.Editor
     /// <item>several inputs: one blendshape driven by the whole product as a custom expression.</item>
     /// </list>
     /// Factors on other parameters are multiplied in the animator into a parameter that a Blendshapes Set copies every
-    /// frame, and the set scales the term's behaviors. Everything else keeps running in the animator on the forwarded
-    /// inputs. The forwarded inputs themselves stay, so the animator path is always there.
+    /// frame, and the set scales the term's behaviors. Parameters that only ever hold 0 or 1 merge their factors, so
+    /// branches FermataFT duplicates per toggle collapse. Everything else keeps running in the animator on the forwarded
+    /// inputs. Selection runs in rounds: a forwarded input the animator no longer reads loses its behavior, and the freed
+    /// budget goes to the next round.
     /// </summary>
     internal static class ShapeBake
     {
@@ -151,6 +154,7 @@ namespace Maberikku.FermataNativeFT.Editor
 
         sealed class Candidate
         {
+            public LayerBake Layer;
             public (string Path, string Name) Shape;
             public Term Term;
             public BakeGate Gate;
@@ -164,16 +168,36 @@ namespace Maberikku.FermataNativeFT.Editor
             public VirtualLayer Layer;
             public VirtualState State;
             public Dictionary<(string Path, string Name), List<Term>> Before;
+
+            /// <summary>Blendshapes some other layer animates; baking them would change how the layers combine.</summary>
+            public HashSet<(string, string)> Elsewhere;
         }
 
+        /// <summary>Everything one bake decides, accumulated over its selection rounds.</summary>
         sealed class Plan
         {
             public readonly List<string> Notes = new List<string>();
             public readonly List<LayerBake> Layers = new List<LayerBake>();
             public readonly List<Candidate> Accepted = new List<Candidate>();
             public readonly List<BakePiece> Pieces = new List<BakePiece>();
+            public readonly Dictionary<string, BakePiece> PieceByKey = new Dictionary<string, BakePiece>(StringComparer.Ordinal);
             public readonly List<BakeGate> Gates = new List<BakeGate>();
+            public readonly Dictionary<string, BakeGate> GateByKey = new Dictionary<string, BakeGate>(StringComparer.Ordinal);
             public readonly Dictionary<(string, string), Source> Sources = new Dictionary<(string, string), Source>();
+
+            /// <summary>Forwarded inputs whose behaviors were removed because nothing in the animator reads them any more.</summary>
+            public readonly List<ForwardTarget> Trimmed = new List<ForwardTarget>();
+
+            public Transform Root;
+            public VRCAvatarDescriptor Descriptor;
+            public PatchPlan Patch;
+            public List<VirtualLayer> AllLayers;
+            public VirtualLayer Smoothing;
+            public LayerInfo SmoothingInfo;
+            public Dictionary<string, ForwardTarget> Inputs;
+            public Dictionary<ForwardTarget, float> Rest;
+            public HashSet<string> Binary;
+            public HashSet<(string, string)> Reserved;
         }
 
         public static void Run(BuildContext context, VirtualAnimatorController fx, IReadOnlyList<VirtualAnimatorController> controllers,
@@ -182,7 +206,7 @@ namespace Maberikku.FermataNativeFT.Editor
             Plan plan;
             try
             {
-                plan = MakePlan(context.AvatarRootTransform, fx, controllers, patch, descriptor);
+                plan = Prepare(context.AvatarRootTransform, fx, controllers, patch, descriptor);
             }
             catch (Exception e)
             {
@@ -190,14 +214,27 @@ namespace Maberikku.FermataNativeFT.Editor
                 BridgeError.Report(ErrorSeverity.NonFatal, $"Shape Bake: skipped ({e.Message}).");
                 return;
             }
-            if (plan.Accepted.Count == 0)
+            if (plan.Layers.Count == 0)
             {
-                var why = plan.Notes.Count > 0 ? string.Join("; ", plan.Notes) : "no exactly bakeable shapes";
+                var why = plan.Notes.Count > 0 ? string.Join("; ", plan.Notes) : "no blend-tree layer reads the forwarded inputs";
                 BridgeError.Report(ErrorSeverity.NonFatal, $"Shape Bake: nothing baked ({why}).");
                 return;
             }
 
-            Apply(context, fx, descriptor, plan);
+            // Baking can leave a forwarded input unread; dropping its behavior frees budget for another round.
+            const int maxRounds = 8;
+            for (var round = 0; round < maxRounds; round++)
+            {
+                Strip(SelectRound(plan));
+                if (TrimForwards(plan) == 0) break;
+            }
+            if (plan.Accepted.Count == 0 && plan.Trimmed.Count == 0)
+            {
+                BridgeError.Report(ErrorSeverity.NonFatal, "Shape Bake: nothing baked (no exactly bakeable shapes fit the budget).");
+                return;
+            }
+
+            Finish(context, fx, descriptor, plan);
 
             var problems = SelfCheck(plan);
             if (problems.Count > 0)
@@ -213,16 +250,22 @@ namespace Maberikku.FermataNativeFT.Editor
             var shapes = plan.Accepted.Select(c => c.Shape).Distinct().Count();
             BridgeError.Report(ErrorSeverity.Information,
                 $"Shape Bake: {plan.Accepted.Count} terms of {shapes} blendshapes, {plan.Pieces.Count} native shapes, " +
-                $"{plan.Pieces.Sum(p => p.Driver.Instructions)} instructions, {plan.Gates.Count} gates.");
+                $"{plan.Pieces.Sum(p => p.Driver.Instructions)} instructions, {plan.Gates.Count} gates, " +
+                $"{plan.Trimmed.Count} forwards dropped ({plan.Trimmed.Sum(t => t.Instructions)} instructions).");
         }
 
-        static Plan MakePlan(Transform root, VirtualAnimatorController fx, IReadOnlyList<VirtualAnimatorController> controllers,
+        /// <summary>Finds the bakeable layers and everything that stays fixed while terms are selected.</summary>
+        static Plan Prepare(Transform root, VirtualAnimatorController fx, IReadOnlyList<VirtualAnimatorController> controllers,
             PatchPlan patch, VRCAvatarDescriptor descriptor)
         {
-            var plan = new Plan();
+            var plan = new Plan { Root = root, Descriptor = descriptor, Patch = patch };
             var allLayers = controllers.SelectMany(c => c.Layers).ToList();
             var infos = allLayers.ToDictionary(l => l, l => AnimatorScan.Scan(l, ""));
             var smoothing = patch.SmoothingLayer?.Source as VirtualLayer;
+            plan.AllLayers = allLayers;
+            plan.Smoothing = smoothing;
+            plan.SmoothingInfo = smoothing != null && infos.TryGetValue(smoothing, out var info) ? info : null;
+            plan.Binary = BinaryParameters(descriptor, controllers);
 
             // Forwarded inputs, and their OSCmooth copies when only the smoothing layer writes them. The copies settle
             // on the forwarded value; the baked part follows the input directly, without OSCmooth's smoothing.
@@ -269,31 +312,37 @@ namespace Maberikku.FermataNativeFT.Editor
                     continue;
                 }
                 BlendTreeTerms.Detach(state);
-                plan.Layers.Add(new LayerBake { Layer = layer, State = state, Before = BlendTreeTerms.Analyze(state) });
+                plan.Layers.Add(new LayerBake { Layer = layer, State = state, Before = BlendTreeTerms.Analyze(state, plan.Binary) });
             }
-            if (plan.Layers.Count == 0) return plan;
-
+            plan.Inputs = inputs;
+            plan.Rest = rest;
+            plan.Reserved = DescriptorShapes(root, descriptor);
             var writes = allLayers.ToDictionary(l => l, BlendshapeWrites);
-            var reserved = DescriptorShapes(root, descriptor);
-            var gates = new Dictionary<string, BakeGate>(StringComparer.Ordinal);
+            foreach (var bake in plan.Layers)
+                bake.Elsewhere = new HashSet<(string, string)>(allLayers.Where(l => l != bake.Layer).SelectMany(l => writes[l]));
+            return plan;
+        }
+
+        /// <summary>Analyses the layers as they are now and selects more terms with whatever budget is left.</summary>
+        static List<Candidate> SelectRound(Plan plan)
+        {
             var candidates = new List<Candidate>();
             foreach (var bake in plan.Layers)
             {
-                var elsewhere = new HashSet<(string, string)>(allLayers.Where(l => l != bake.Layer).SelectMany(l => writes[l]));
-                foreach (var pair in bake.Before.OrderBy(p => p.Key.Path, StringComparer.Ordinal).ThenBy(p => p.Key.Name, StringComparer.Ordinal))
+                var current = BlendTreeTerms.Analyze(bake.State, plan.Binary);
+                foreach (var pair in current.OrderBy(p => p.Key.Path, StringComparer.Ordinal).ThenBy(p => p.Key.Name, StringComparer.Ordinal))
                 {
-                    if (elsewhere.Contains(pair.Key) || reserved.Contains(pair.Key)) continue;
-                    var source = GetSource(root, pair.Key, plan.Sources);
+                    if (bake.Elsewhere.Contains(pair.Key) || plan.Reserved.Contains(pair.Key)) continue;
+                    var source = GetSource(plan.Root, pair.Key, plan.Sources);
                     if (source == null) continue;
                     foreach (var term in pair.Value)
                     {
-                        var candidate = MakeCandidate(pair.Key, term, source, inputs, rest, gates);
+                        var candidate = MakeCandidate(plan, bake, pair.Key, term, source);
                         if (candidate != null) candidates.Add(candidate);
                     }
                 }
             }
-            Select(plan, candidates, descriptor);
-            return plan;
+            return Select(plan, candidates);
         }
 
         static VirtualState SingleState(VirtualLayer layer)
@@ -387,9 +436,11 @@ namespace Maberikku.FermataNativeFT.Editor
             return source;
         }
 
-        static Candidate MakeCandidate((string, string) shape, Term term, Source source, Dictionary<string, ForwardTarget> inputs,
-            Dictionary<ForwardTarget, float> rest, Dictionary<string, BakeGate> gates)
+        static Candidate MakeCandidate(Plan plan, LayerBake bake, (string, string) shape, Term term, Source source)
         {
+            var inputs = plan.Inputs;
+            var rest = plan.Rest;
+            var gates = plan.GateByKey;
             if (term.Opaque != null || term.IsZero) return null;
             var tracked = term.Factors.Where(f => inputs.ContainsKey(f.Parameter)).ToList();
             var others = term.Factors.Where(f => !inputs.ContainsKey(f.Parameter)).ToList();
@@ -420,6 +471,7 @@ namespace Maberikku.FermataNativeFT.Editor
 
             return new Candidate
             {
+                Layer = bake,
                 Shape = shape,
                 Term = term,
                 Gate = gate,
@@ -557,19 +609,23 @@ namespace Maberikku.FermataNativeFT.Editor
         /// Picks terms by how much they move the mesh per instruction until the next one would exceed a native face
         /// tracking limit. Terms that share a driver and gate share its behavior and blendshape.
         /// </summary>
-        static void Select(Plan plan, List<Candidate> candidates, VRCAvatarDescriptor descriptor)
+        static List<Candidate> Select(Plan plan, List<Candidate> candidates)
         {
+            // The descriptor holds the forwards (minus trimmed ones); pieces from earlier rounds aren't added to it yet.
+            var descriptor = plan.Descriptor;
             var behaviors = descriptor.faceTrackingParameterBehaviors?.Where(b => b != null).ToList()
                             ?? new List<VRCAvatarDescriptor.FaceTrackingParameterBehavior>();
-            var behaviorBudget = NativeExpression.MaxBehaviors - behaviors.Count;
+            var behaviorBudget = NativeExpression.MaxBehaviors - behaviors.Count - plan.Pieces.Count;
             var instructionBudget = NativeExpression.MaxInstructions - behaviors
                 .Where(b => b.combineMode == VRCAvatarDescriptor.ParameterBehaviorCombineMode.Custom && !string.IsNullOrWhiteSpace(b.customExpression))
-                .Sum(b => NativeExpression.CountInstructions(b.customExpression));
-            var setBudget = MaxSets - (descriptor.faceTrackingBlendshapesSetList?.Count ?? 0);
+                .Sum(b => NativeExpression.CountInstructions(b.customExpression)) - plan.Pieces.Sum(p => p.Driver.Instructions);
+            var setBudget = MaxSets - (descriptor.faceTrackingBlendshapesSetList?.Count ?? 0) - plan.Gates.Count;
             var meshes = new HashSet<SkinnedMeshRenderer>(descriptor.faceTrackingMeshes?.Where(r => r) ?? Enumerable.Empty<SkinnedMeshRenderer>());
+            meshes.UnionWith(plan.Accepted.Select(c => c.Source.Renderer));
 
-            var pieces = new Dictionary<string, BakePiece>(StringComparer.Ordinal);
-            var gates = new HashSet<BakeGate>();
+            var pieces = plan.PieceByKey;
+            var gates = new HashSet<BakeGate>(plan.Gates);
+            var accepted = new List<Candidate>();
             var remaining = candidates.ToList();
             while (true)
             {
@@ -594,6 +650,7 @@ namespace Maberikku.FermataNativeFT.Editor
 
                 remaining.Remove(best);
                 plan.Accepted.Add(best);
+                accepted.Add(best);
                 meshes.Add(best.Source.Renderer);
                 if (best.Gate != null && gates.Add(best.Gate))
                 {
@@ -614,15 +671,16 @@ namespace Maberikku.FermataNativeFT.Editor
                     piece.Contributions[best.Shape] = sum + amount;
                 }
             }
+            return accepted;
         }
 
         static string PieceKey(BakeDriver driver, BakeGate gate) => driver.Key + "@" + (gate?.Key ?? "");
 
-        static void Apply(BuildContext context, VirtualAnimatorController fx, VRCAvatarDescriptor descriptor, Plan plan)
+        /// <summary>The animator stops producing the accepted terms: their clip slots no longer animate those blendshapes.</summary>
+        static void Strip(List<Candidate> accepted)
         {
-            // The animator stops producing the baked terms.
             var removals = new Dictionary<Occurrence, List<(string Path, string Name)>>();
-            foreach (var c in plan.Accepted)
+            foreach (var c in accepted)
             foreach (var at in c.Term.Occurrences)
             {
                 if (!removals.TryGetValue(at, out var list)) removals[at] = list = new List<(string, string)>();
@@ -635,7 +693,197 @@ namespace Maberikku.FermataNativeFT.Editor
                     clip.SetFloatCurve(path, typeof(SkinnedMeshRenderer), BlendTreeTerms.BlendShapePrefix + name, null);
                 pair.Key.SetClip(clip);
             }
+        }
 
+        /// <summary>
+        /// Removes the forward behavior of every FermataFT input that no layer reads any more, directly or through its
+        /// OSCmooth copy. Extra custom forwards stay. Returns how many were removed.
+        /// </summary>
+        static int TrimForwards(Plan plan)
+        {
+            if (plan.SmoothingInfo == null) return 0;
+            var needed = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var layer in plan.AllLayers)
+            {
+                if (layer == plan.Smoothing) continue;
+                foreach (var parameter in LiveReads(layer))
+                    if (plan.Inputs.TryGetValue(parameter, out var target))
+                        needed.Add(target.Parameter);
+            }
+            var behaviors = plan.Descriptor.faceTrackingParameterBehaviors;
+            if (behaviors == null) return 0;
+            var removed = 0;
+            foreach (var target in plan.Patch.Targets)
+            {
+                if (needed.Contains(target.Parameter) || !plan.SmoothingInfo.Reads.Contains(target.Parameter) || plan.Trimmed.Contains(target)) continue;
+                var index = behaviors.FindIndex(b => b != null && b.targetMode == VRCAvatarDescriptor.ParameterBehaviorTargetMode.ForwardToAnimator
+                                                     && b.outputParameterName == target.Parameter);
+                if (index < 0) continue;
+                behaviors.RemoveAt(index);
+                plan.Trimmed.Add(target);
+                removed++;
+            }
+            return removed;
+        }
+
+        /// <summary>
+        /// Parameters a layer reads in a way that can change what it does: transition conditions, state behaviours and
+        /// state parameters, and blend tree parameters only where the subtree still animates something.
+        /// </summary>
+        static HashSet<string> LiveReads(VirtualLayer layer)
+        {
+            var reads = new HashSet<string>(StringComparer.Ordinal);
+            void Conditions(IEnumerable<AnimatorCondition> conditions)
+            {
+                foreach (var c in conditions) reads.Add(c.parameter);
+            }
+            void Behaviours(IEnumerable<StateMachineBehaviour> behaviours)
+            {
+                foreach (var driver in behaviours.OfType<VRCAvatarParameterDriver>())
+                {
+                    if (!driver || driver.parameters == null) continue;
+                    foreach (var p in driver.parameters)
+                    {
+                        if (p == null) continue;
+                        if (p.type == VRC_AvatarParameterDriver.ChangeType.Copy) reads.Add(p.source);
+                        if (p.type == VRC_AvatarParameterDriver.ChangeType.Add) reads.Add(p.name);
+                    }
+                }
+            }
+            foreach (var node in layer.AllReachableNodes())
+            {
+                switch (node)
+                {
+                    case VirtualStateMachine sm:
+                        Behaviours(sm.Behaviours);
+                        break;
+                    case VirtualState state:
+                        Behaviours(state.Behaviours);
+                        foreach (var p in new[] { state.SpeedParameter, state.TimeParameter, state.CycleOffsetParameter, state.MirrorParameter })
+                            if (!string.IsNullOrEmpty(p)) reads.Add(p);
+                        LiveMotion(state.Motion, reads);
+                        break;
+                    case VirtualTransitionBase transition:
+                        Conditions(transition.Conditions);
+                        break;
+                }
+            }
+            return reads;
+        }
+
+        static bool LiveMotion(VirtualMotion motion, HashSet<string> reads)
+        {
+            switch (motion)
+            {
+                case VirtualClip clip:
+                    return clip.GetFloatCurveBindings().Any() || clip.GetObjectCurveBindings().Any();
+                case VirtualBlendTree tree:
+                    var live = false;
+                    foreach (var child in tree.Children)
+                    {
+                        if (!LiveMotion(child.Motion, reads)) continue;
+                        live = true;
+                        if (tree.BlendType == BlendTreeType.Direct) reads.Add(child.DirectBlendParameter);
+                    }
+                    if (live && tree.BlendType != BlendTreeType.Direct)
+                    {
+                        reads.Add(tree.BlendParameter);
+                        if (tree.BlendType != BlendTreeType.Simple1D) reads.Add(tree.BlendParameterY);
+                    }
+                    return live;
+                default:
+                    return false;
+            }
+        }
+
+        /// <summary>
+        /// Parameters that only ever hold 0 or 1: every value the avatar can give them (defaults, parameter drivers,
+        /// menu toggles and buttons) is 0 or 1, and nothing else writes them (clips, puppets, contacts, PhysBones,
+        /// VRChat's own continuous parameters). OSC from outside the avatar can't be seen and is assumed not to.
+        /// </summary>
+        static HashSet<string> BinaryParameters(VRCAvatarDescriptor descriptor, IReadOnlyList<VirtualAnimatorController> controllers)
+        {
+            var values = new Dictionary<string, HashSet<float>>(StringComparer.Ordinal);
+            var other = new HashSet<string>(StringComparer.Ordinal)
+            {
+                "GestureLeft", "GestureRight", "GestureLeftWeight", "GestureRightWeight", "Viseme", "Voice", "VelocityX",
+                "VelocityY", "VelocityZ", "VelocityMagnitude", "AngularY", "Upright", "TrackingType", "VRMode",
+                "ScaleFactor", "ScaleFactorInverse", "EyeHeightAsMeters", "EyeHeightAsPercent", "AvatarVersion",
+            };
+            var prefixes = new List<string>();
+            void Value(string name, float value)
+            {
+                if (string.IsNullOrEmpty(name)) return;
+                if (!values.TryGetValue(name, out var set)) values[name] = set = new HashSet<float>();
+                set.Add(value);
+            }
+
+            foreach (var controller in controllers)
+            {
+                foreach (var p in controller.Parameters.Values)
+                    Value(p.name, p.type == AnimatorControllerParameterType.Float ? p.defaultFloat
+                        : p.type == AnimatorControllerParameterType.Int ? p.defaultInt : p.defaultBool ? 1f : 0f);
+                foreach (var layer in controller.Layers)
+                foreach (var node in layer.AllReachableNodes())
+                {
+                    if (node is VirtualClip clip)
+                    {
+                        foreach (var b in clip.GetFloatCurveBindings())
+                            if (b.type == typeof(Animator) && string.IsNullOrEmpty(b.path)) other.Add(b.propertyName);
+                        continue;
+                    }
+                    var behaviours = node is VirtualState s ? s.Behaviours : node is VirtualStateMachine m ? m.Behaviours : null;
+                    if (behaviours == null) continue;
+                    foreach (var driver in behaviours.OfType<VRCAvatarParameterDriver>())
+                    {
+                        if (!driver || driver.parameters == null) continue;
+                        foreach (var p in driver.parameters)
+                        {
+                            if (p == null) continue;
+                            if (p.type == VRC_AvatarParameterDriver.ChangeType.Set) Value(p.name, p.value);
+                            else other.Add(p.name);
+                        }
+                    }
+                }
+            }
+
+            foreach (var p in descriptor.expressionParameters?.parameters ?? Array.Empty<VRCExpressionParameters.Parameter>())
+                if (p != null) Value(p.name, p.defaultValue);
+            var visited = new HashSet<VRCExpressionsMenu>();
+            var pending = new Stack<VRCExpressionsMenu>();
+            if (descriptor.expressionsMenu) pending.Push(descriptor.expressionsMenu);
+            while (pending.Count > 0)
+            {
+                var menu = pending.Pop();
+                if (!visited.Add(menu) || menu.controls == null) continue;
+                foreach (var control in menu.controls)
+                {
+                    if (control == null) continue;
+                    Value(control.parameter?.name, control.value);
+                    foreach (var sub in control.subParameters ?? Array.Empty<VRCExpressionsMenu.Control.Parameter>())
+                        if (!string.IsNullOrEmpty(sub?.name)) other.Add(sub.name);
+                    if (control.subMenu) pending.Push(control.subMenu);
+                }
+            }
+
+            // Contacts and PhysBones write parameters named by a field called "parameter" (a prefix for PhysBones).
+            foreach (var component in descriptor.GetComponentsInChildren<MonoBehaviour>(true))
+            {
+                if (!component) continue;
+                var field = component.GetType().GetField("parameter");
+                if (field != null && field.FieldType == typeof(string) && field.GetValue(component) is string prefix && prefix.Length > 0)
+                    prefixes.Add(prefix);
+            }
+
+            return new HashSet<string>(values.Where(kv => kv.Value.All(v => v == 0f || v == 1f) && !other.Contains(kv.Key)
+                                                          && !prefixes.Any(p => kv.Key.StartsWith(p, StringComparison.Ordinal)))
+                .Select(kv => kv.Key), StringComparer.Ordinal);
+        }
+
+        /// <summary>Creates the baked blendshapes, the gate layers and the behaviors for every accepted piece.</summary>
+        static void Finish(BuildContext context, VirtualAnimatorController fx, VRCAvatarDescriptor descriptor, Plan plan)
+        {
+            if (plan.Pieces.Count == 0) return;
             var renderers = BakeMeshes(context, plan);
             if (plan.Gates.Count > 0) AddGateLayers(fx, descriptor, plan);
 
@@ -851,22 +1099,29 @@ namespace Maberikku.FermataNativeFT.Editor
             var problems = new List<string>();
             foreach (var bake in plan.Layers)
             {
-                var after = BlendTreeTerms.Analyze(bake.State);
+                var after = BlendTreeTerms.Analyze(bake.State, plan.Binary);
                 foreach (var shape in bake.Before.Keys.Union(after.Keys))
                 {
-                    var baked = plan.Accepted.Where(c => c.Shape == shape && bake.Before.TryGetValue(shape, out var terms) && terms.Contains(c.Term)).Select(c => c.Term).ToList();
-                    var expected = (bake.Before.TryGetValue(shape, out var before) ? before : new List<Term>()).Where(t => !baked.Contains(t)).ToList();
-                    var actual = after.TryGetValue(shape, out var a) ? a : new List<Term>();
-                    if (Describe(expected) != Describe(actual))
-                        problems.Add($"'{bake.Layer.Name}' {shape.Path}:{shape.Name} kept {Describe(actual)}, expected {Describe(expected)}.");
+                    var expected = (bake.Before.TryGetValue(shape, out var before) ? before : new List<Term>()).Select(Describe).ToList();
+                    foreach (var c in plan.Accepted.Where(c => c.Layer == bake && c.Shape == shape))
+                        expected.Remove(Describe(c.Term));
+                    var actual = (after.TryGetValue(shape, out var a) ? a : new List<Term>()).Select(Describe).ToList();
+                    var e = string.Join(" + ", expected.OrderBy(s => s, StringComparer.Ordinal));
+                    var k = string.Join(" + ", actual.OrderBy(s => s, StringComparer.Ordinal));
+                    if (e != k) problems.Add($"'{bake.Layer.Name}' {shape.Path}:{shape.Name} kept {k}, expected {e}.");
                 }
             }
+
+            foreach (var layer in plan.AllLayers.Where(l => l != plan.Smoothing))
+            foreach (var parameter in LiveReads(layer))
+                if (plan.Inputs.TryGetValue(parameter, out var target) && plan.Trimmed.Contains(target))
+                    problems.Add($"'{target.Parameter}' is no longer forwarded but layer '{layer.Name}' still reads '{parameter}'.");
             return problems;
         }
 
-        static string Describe(List<Term> terms) =>
-            $"{terms.Count(t => t.Opaque != null)} opaque; " + string.Join(" + ", terms.Where(t => t.Opaque == null)
-                .Select(t => t.Coefficient.ToString("0.####", CultureInfo.InvariantCulture) + "*[" + t.Signature + "]")
-                .OrderBy(s => s, StringComparer.Ordinal));
+        // Opaque terms have no stable identity between analyses, so they are compared by count only.
+        static string Describe(Term t) => t.Opaque != null
+            ? "opaque"
+            : t.Coefficient.ToString("0.####", CultureInfo.InvariantCulture) + "*[" + t.Signature + "]";
     }
 }

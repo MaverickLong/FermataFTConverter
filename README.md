@@ -53,6 +53,7 @@ Off by default. With **Bake Exact Shapes** on, the parts of FermataFT's face tha
 - **What is baked:** blendshape movements that FermataFT's blend trees compute from tracking through straight-line segments, for example brows, eye wide, squint, smile and sad, cheeks, and, as the instruction budget allows, blink and jaw. Shapes that move together share one baked shape.
 - **Toggles keep working:** the eye and lip tracking toggles, gesture fades, Eye Lid LR Sync and Quest Pro mode still apply to baked shapes. The animator works out their effect and hands it to native face tracking as Blendshapes Set weights.
 - **What is not baked:** 2D blends (eye gaze, tongue direction), shapes another layer also animates, and anything that would pass VRChat's limits (512 instructions, 128 behaviors).
+- **Inputs nothing reads any more:** after baking, a forwarded input that FermataFT's animator no longer reads is not forwarded, and the bake uses the instructions it saves.
 - **Differences:** baked shapes skip OSCmooth's smoothing, and they follow a toggle a frame or two later.
 - **Where to see results:** the NDMF console shows a summary line, and the Unity console lists every baked shape.
 

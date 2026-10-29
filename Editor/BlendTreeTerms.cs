@@ -140,6 +140,23 @@ namespace Maberikku.FermataNativeFT.Editor
             return new Term(Coefficient, factors, null, Occurrences);
         }
 
+        /// <summary>
+        /// Multiplies in a factor on a parameter that only ever holds 0 or 1. Only its values there matter, so it
+        /// merges with any other factor on the same parameter; equivalent branches of the tree then compare equal.
+        /// </summary>
+        public Term TimesBinary(Factor factor)
+        {
+            if (Opaque != null) return this;
+            var existing = Factors.FirstOrDefault(f => f.Parameter == factor.Parameter);
+            var at0 = factor.Evaluate(0f) * (existing?.Evaluate(0f) ?? 1f);
+            var at1 = factor.Evaluate(1f) * (existing?.Evaluate(1f) ?? 1f);
+            var others = Factors.Where(f => f != existing).ToList();
+            if (Math.Abs(at0 - at1) <= Epsilon) return new Term(Coefficient * at0, others, null, Occurrences);
+            var scale = Math.Max(Math.Abs(at0), Math.Abs(at1));
+            others.Add(Factor.Curve(factor.Parameter, new[] { 0f, 1f }, new[] { at0 / scale, at1 / scale }));
+            return new Term(Coefficient * scale, others.OrderBy(f => f.Key, StringComparer.Ordinal).ToList(), null, Occurrences);
+        }
+
         public bool IsZero => Opaque == null && Math.Abs(Coefficient) < Epsilon;
     }
 
@@ -153,8 +170,12 @@ namespace Maberikku.FermataNativeFT.Editor
     {
         public const string BlendShapePrefix = "blendShape.";
 
-        public static Dictionary<(string Path, string Name), List<Term>> Analyze(VirtualState state) =>
-            Motion(state.Motion, new Occurrence(null, -1, state));
+        /// <param name="binary">Parameters that only ever hold 0 or 1; their factors merge (see <see cref="Term.TimesBinary"/>).</param>
+        public static Dictionary<(string Path, string Name), List<Term>> Analyze(VirtualState state, ISet<string> binary) =>
+            Motion(state.Motion, new Occurrence(null, -1, state), binary);
+
+        static Term Times(Term term, Factor factor, ISet<string> binary) =>
+            binary.Contains(factor.Parameter) ? term.TimesBinary(factor) : term.Times(factor);
 
         /// <summary>
         /// Replaces the state's motion with a copy in which no blend tree is shared, so each clip slot is reached by
@@ -207,14 +228,14 @@ namespace Maberikku.FermataNativeFT.Editor
                 yield return p;
         }
 
-        static Dictionary<(string, string), List<Term>> Motion(VirtualMotion motion, Occurrence at)
+        static Dictionary<(string, string), List<Term>> Motion(VirtualMotion motion, Occurrence at, ISet<string> binary)
         {
             switch (motion)
             {
                 case VirtualClip clip:
                     return Clip(clip, at);
                 case VirtualBlendTree tree:
-                    return Tree(tree, at.State);
+                    return Tree(tree, at.State, binary);
                 default:
                     return new Dictionary<(string, string), List<Term>>();
             }
@@ -251,10 +272,10 @@ namespace Maberikku.FermataNativeFT.Editor
         // Equal values joined by flat or stepped tangents stay constant between keys.
         static bool Flat(float tangent) => tangent == 0f || float.IsInfinity(tangent);
 
-        static Dictionary<(string, string), List<Term>> Tree(VirtualBlendTree tree, VirtualState state)
+        static Dictionary<(string, string), List<Term>> Tree(VirtualBlendTree tree, VirtualState state, ISet<string> binary)
         {
             var children = tree.Children;
-            var results = children.Select((c, i) => Motion(c.Motion, new Occurrence(tree, i, state))).ToList();
+            var results = children.Select((c, i) => Motion(c.Motion, new Occurrence(tree, i, state), binary)).ToList();
             var shapes = results.SelectMany(r => r.Keys).Distinct().ToList();
             var output = new Dictionary<(string, string), List<Term>>();
 
@@ -271,7 +292,7 @@ namespace Maberikku.FermataNativeFT.Editor
                             if (!results[i].TryGetValue(shape, out var childTerms)) continue;
                             foreach (var t in childTerms)
                                 terms.Add(normalized ? Term.MakeOpaque("normalised Direct blend tree", t.Occurrences)
-                                    : t.Times(Factor.Weight(children[i].DirectBlendParameter)));
+                                    : Times(t, Factor.Weight(children[i].DirectBlendParameter), binary));
                         }
                         output[shape] = Normalize(terms);
                     }
@@ -308,7 +329,7 @@ namespace Maberikku.FermataNativeFT.Editor
                         foreach (var signature in signatures)
                         {
                             var group = groups[signature];
-                            terms.Add(Along(tree.BlendParameter, knots, group.Values, group.First, group.Occurrences));
+                            terms.Add(Along(tree.BlendParameter, knots, group.Values, group.First, group.Occurrences, binary));
                         }
                         output[shape] = Normalize(terms);
                     }
@@ -338,7 +359,7 @@ namespace Maberikku.FermataNativeFT.Editor
         }
 
         /// <summary>A 1D tree's sum of child terms with one signature: the children's coefficients interpolated over the parameter.</summary>
-        static Term Along(string parameter, float[] knots, float[] values, Term first, List<Occurrence> occurrences)
+        static Term Along(string parameter, float[] knots, float[] values, Term first, List<Occurrence> occurrences, ISet<string> binary)
         {
             var k = new List<float>();
             var v = new List<float>();
@@ -356,7 +377,7 @@ namespace Maberikku.FermataNativeFT.Editor
             }
             if (v.All(x => Math.Abs(x - v[0]) <= Term.Epsilon)) return first.With(v[0], occurrences);
             var scale = v.Max(Math.Abs);
-            return first.With(scale, occurrences).Times(Factor.Curve(parameter, k.ToArray(), v.Select(x => x / scale).ToArray()));
+            return Times(first.With(scale, occurrences), Factor.Curve(parameter, k.ToArray(), v.Select(x => x / scale).ToArray()), binary);
         }
 
         /// <summary>Merges terms with the same signature and drops zero ones.</summary>
