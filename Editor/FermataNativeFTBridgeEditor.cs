@@ -49,7 +49,12 @@ namespace Maberikku.FermataNativeFT.Editor
             var root = new VisualElement();
             _status = new IMGUIContainer(DrawStatus);
             root.Add(_status);
-            root.Add(new PropertyField(serializedObject.FindProperty(nameof(FermataNativeFTBridge.bakeExactShapes)), "Bake Exact Shapes (experimental)"));
+            var bake = new Toggle("Bake Exact Shapes (experimental)")
+            {
+                tooltip = "Moves what native face tracking reproduces exactly onto baked blendshapes. Turns OSCmooth off when anything is baked.",
+            };
+            bake.BindProperty(serializedObject.FindProperty(nameof(FermataNativeFTBridge.bakeExactShapes)));
+            root.Add(bake);
             _custom = new CustomForwardList(serializedObject, CustomForwards);
             root.Add(_custom.Root);
             root.TrackSerializedObjectValue(serializedObject, _ =>
