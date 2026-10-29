@@ -197,35 +197,144 @@ namespace Maberikku.FermataNativeFT.Editor
             /// <summary>Forwarded inputs whose behaviors were removed because nothing in the animator reads them any more.</summary>
             public readonly List<ForwardTarget> Trimmed = new List<ForwardTarget>();
 
-            /// <summary>Curves and blend tree nodes the animator evaluates in the baked layers and OSCmooth's smoothing layer.</summary>
-            public (int Curves, int Nodes) TreeBefore, TreeAfter, SmoothingBefore, SmoothingAfter;
+            /// <summary>Curves and blend tree nodes the animator evaluates in the baked layers.</summary>
+            public (int Curves, int Nodes) TreeBefore, TreeAfter;
 
-            /// <summary>Blendshapes the baked layers only ever set to 0, now set by one constant clip.</summary>
-            public int Folded;
+            /// <summary>Curves of OSCmooth's smoothing layer, removed once anything is native.</summary>
+            public int SmoothingCurves;
 
-            /// <summary>Curves in the smoothing layer that write each input's OSCmooth copy.</summary>
-            public readonly Dictionary<ForwardTarget, int> SmoothingCurves = new Dictionary<ForwardTarget, int>();
+            public bool SmoothingRemoved;
 
             public Transform Root;
             public VirtualAnimatorController Fx;
             public VRCAvatarDescriptor Descriptor;
             public PatchPlan Patch;
-            public List<VirtualLayer> AllLayers;
-            public VirtualLayer Smoothing;
-            public LayerInfo SmoothingInfo;
-            public Dictionary<string, ForwardTarget> Inputs;
+            public Survey Survey;
+            public List<VirtualLayer> AllLayers => Survey.AllLayers;
+            public VirtualLayer Smoothing => Survey.Smoothing;
+            public LayerInfo SmoothingInfo => Survey.SmoothingInfo;
+            public Dictionary<string, ForwardTarget> Inputs => Survey.Inputs;
             public Dictionary<ForwardTarget, float> Rest;
             public HashSet<string> Binary;
             public HashSet<(string, string)> Reserved;
         }
 
-        public static void Run(BuildContext context, VirtualAnimatorController fx, IReadOnlyList<VirtualAnimatorController> controllers,
-            PatchPlan patch, VRCAvatarDescriptor descriptor)
+        /// <summary>The layers this tool may rewrite, and what it needs to know about the controllers around them.</summary>
+        internal sealed class Survey
+        {
+            public List<VirtualLayer> AllLayers;
+            public VirtualLayer Smoothing;
+            public LayerInfo SmoothingInfo;
+
+            /// <summary>
+            /// Forwarded inputs by the parameter blend trees read: the input itself, and its OSCmooth copy when only the
+            /// smoothing layer writes it. The copy settles on the forwarded value.
+            /// </summary>
+            public Dictionary<string, ForwardTarget> Inputs;
+
+            /// <summary>FX layers whose weight a layer control animates (virtual indices), or that FermataFT controls by name.</summary>
+            public HashSet<int> Controlled;
+
+            public HashSet<string> Named;
+
+            /// <summary>Single-state Write Defaults blend-tree layers that read forwarded inputs and output exactly their blend tree.</summary>
+            public readonly List<(VirtualLayer Layer, VirtualState State)> FaceLayers = new List<(VirtualLayer, VirtualState)>();
+
+            public readonly List<string> Notes = new List<string>();
+        }
+
+        public static Survey Look(VirtualAnimatorController fx, IReadOnlyList<VirtualAnimatorController> controllers, PatchPlan patch)
+        {
+            var survey = new Survey { AllLayers = controllers.SelectMany(c => c.Layers).ToList() };
+            var infos = survey.AllLayers.ToDictionary(l => l, l => AnimatorScan.Scan(l, ""));
+            survey.Smoothing = patch.SmoothingLayer?.Source as VirtualLayer;
+            survey.SmoothingInfo = survey.Smoothing != null && infos.TryGetValue(survey.Smoothing, out var info) ? info : null;
+
+            survey.Inputs = new Dictionary<string, ForwardTarget>(StringComparer.Ordinal);
+            foreach (var t in patch.Targets) survey.Inputs[t.Parameter] = t;
+            if (survey.SmoothingInfo != null)
+            {
+                foreach (var t in patch.Targets)
+                {
+                    var proxy = FermataProfile.ProxyPrefix + t.Parameter;
+                    if (survey.SmoothingInfo.Writes.Contains(proxy) && survey.SmoothingInfo.Reads.Contains(t.Parameter)
+                        && infos.All(kv => kv.Key == survey.Smoothing || !kv.Value.Writes.Contains(proxy)))
+                        survey.Inputs[proxy] = t;
+                }
+            }
+
+            survey.Controlled = new HashSet<int>();
+            foreach (var layer in survey.AllLayers)
+            foreach (var node in layer.AllReachableNodes())
+            {
+                var behaviours = node is VirtualState s ? s.Behaviours : node is VirtualStateMachine m ? m.Behaviours : null;
+                if (behaviours == null) continue;
+                foreach (var control in behaviours.OfType<VRCAnimatorLayerControl>())
+                    if (control && control.playable == VRC_AnimatorLayerControl.BlendableLayer.FX)
+                        survey.Controlled.Add(control.layer);
+            }
+            survey.Named = new HashSet<string>(infos.Values.SelectMany(i => i.NamedLayerTargets), StringComparer.Ordinal);
+
+            foreach (var layer in fx.Layers)
+            {
+                if (layer == survey.Smoothing) continue;
+                var state = SingleState(layer);
+                if (state == null || !BlendTreeTerms.Parameters(state.Motion).Any(survey.Inputs.ContainsKey)) continue;
+                var problem = LayerProblem(layer, state, survey.Controlled, survey.Named);
+                if (problem != null) survey.Notes.Add($"layer '{layer.Name}' {problem}");
+                else survey.FaceLayers.Add((layer, state));
+            }
+            return survey;
+        }
+
+        /// <summary>
+        /// Folds the blendshapes FermataFT's face layers only ever set to 0 into one constant clip, then prunes what no
+        /// longer animates anything. Exact, so it runs on every build, with or without the shape bake.
+        /// </summary>
+        public static void Fold(Transform root, VirtualAnimatorController fx, Survey survey)
+        {
+            var none = new HashSet<string>();
+            var empty = VirtualClip.Create(NamePrefix + "Empty");
+            foreach (var (layer, state) in survey.FaceLayers)
+            {
+                BlendTreeTerms.Detach(state);
+                var before = BlendTreeTerms.Analyze(state, none);
+                var countBefore = Count(new[] { state.Motion });
+                var folded = FoldZeros(fx, root, state);
+                if (folded.Count == 0) continue;
+                state.Motion = Prune(state.Motion, empty);
+
+                var after = BlendTreeTerms.Analyze(state, none);
+                var writes = BlendshapeWrites(layer);
+                foreach (var shape in before.Keys.Union(after.Keys))
+                {
+                    if (folded.Contains(shape))
+                    {
+                        if (!writes.Contains(shape))
+                            BridgeError.Report(ErrorSeverity.Error, $"Zero folding self-check failed: '{layer.Name}' no longer animates {shape.Item1}:{shape.Item2}.");
+                        continue;
+                    }
+                    var e = Describe(before.TryGetValue(shape, out var b) ? b : new List<Term>());
+                    var k = Describe(after.TryGetValue(shape, out var a) ? a : new List<Term>());
+                    if (e != k)
+                        BridgeError.Report(ErrorSeverity.Error, $"Zero folding self-check failed: '{layer.Name}' {shape.Item1}:{shape.Item2} changed from {e} to {k}.");
+                }
+                var countAfter = Count(new[] { state.Motion });
+                Debug.Log($"[{Messages.Title}] Zero folding, '{layer.Name}': {folded.Count} blendshapes, " +
+                          $"{countBefore.Curves} -> {countAfter.Curves} curves, {countBefore.Nodes} -> {countAfter.Nodes} nodes.");
+            }
+        }
+
+        static string Describe(List<Term> terms) =>
+            string.Join(" + ", terms.Select(Describe).OrderBy(s => s, StringComparer.Ordinal));
+
+        public static void Run(BuildContext context, VirtualAnimatorController fx, Survey survey, PatchPlan patch, VRCAvatarDescriptor descriptor,
+            IReadOnlyList<VirtualAnimatorController> controllers)
         {
             Plan plan;
             try
             {
-                plan = Prepare(context.AvatarRootTransform, fx, controllers, patch, descriptor);
+                plan = Prepare(context.AvatarRootTransform, fx, survey, patch, descriptor, controllers);
             }
             catch (Exception e)
             {
@@ -241,8 +350,6 @@ namespace Maberikku.FermataNativeFT.Editor
             }
 
             plan.TreeBefore = Count(plan.Layers.Select(l => l.State.Motion));
-            plan.SmoothingBefore = Count(SmoothingStates(plan).Select(s => s.Motion));
-            foreach (var bake in plan.Layers) plan.Folded += FoldZeros(plan, bake);
 
             // Baking can leave a forwarded input unread; dropping its behavior frees budget for another round.
             const int maxRounds = 8;
@@ -251,17 +358,18 @@ namespace Maberikku.FermataNativeFT.Editor
                 Strip(SelectRound(plan));
                 if (TrimForwards(plan) == 0) break;
             }
-            if (plan.Accepted.Count == 0 && plan.Trimmed.Count == 0 && plan.Folded == 0)
+            if (plan.Accepted.Count == 0 && plan.Trimmed.Count == 0)
             {
                 BridgeError.Report(ErrorSeverity.NonFatal, "Shape Bake: nothing baked (no exactly bakeable shapes fit the budget).");
                 return;
             }
 
+            // Native shapes follow tracking directly; the animator's part must see the same values at the same time.
+            if (plan.Accepted.Count > 0) DisableSmoothing(plan);
+
             var empty = VirtualClip.Create(NamePrefix + "Empty");
             foreach (var bake in plan.Layers) bake.State.Motion = Prune(bake.State.Motion, empty);
-            PruneSmoothing(plan, empty);
             plan.TreeAfter = Count(plan.Layers.Select(l => l.State.Motion));
-            plan.SmoothingAfter = Count(SmoothingStates(plan).Select(s => s.Motion));
 
             Finish(context, fx, descriptor, plan);
 
@@ -280,87 +388,90 @@ namespace Maberikku.FermataNativeFT.Editor
             BridgeError.Report(ErrorSeverity.Information,
                 $"Shape Bake: {plan.Accepted.Count} terms of {shapes} blendshapes, {plan.Pieces.Count} native shapes, " +
                 $"{plan.Pieces.Sum(p => p.Driver.Instructions)} instructions, {plan.Gates.Count} gates, " +
-                $"{plan.Trimmed.Count} forwards dropped ({plan.Trimmed.Sum(t => t.Instructions)} instructions), {plan.Folded} zero shapes folded. " +
+                $"{plan.Trimmed.Count} forwards dropped ({plan.Trimmed.Sum(t => t.Instructions)} instructions). " +
                 $"Face tree: {plan.TreeBefore.Curves} -> {plan.TreeAfter.Curves} curves, {plan.TreeBefore.Nodes} -> {plan.TreeAfter.Nodes} nodes. " +
-                $"Smoothing: {plan.SmoothingBefore.Curves} -> {plan.SmoothingAfter.Curves} curves.");
+                (plan.SmoothingRemoved ? $"OSCmooth: off ({plan.SmoothingCurves} curves)." : "OSCmooth: kept."));
         }
 
         /// <summary>Finds the bakeable layers and everything that stays fixed while terms are selected.</summary>
-        static Plan Prepare(Transform root, VirtualAnimatorController fx, IReadOnlyList<VirtualAnimatorController> controllers,
-            PatchPlan patch, VRCAvatarDescriptor descriptor)
+        static Plan Prepare(Transform root, VirtualAnimatorController fx, Survey survey, PatchPlan patch, VRCAvatarDescriptor descriptor,
+            IReadOnlyList<VirtualAnimatorController> controllers)
         {
-            var plan = new Plan { Root = root, Fx = fx, Descriptor = descriptor, Patch = patch };
-            var allLayers = controllers.SelectMany(c => c.Layers).ToList();
-            var infos = allLayers.ToDictionary(l => l, l => AnimatorScan.Scan(l, ""));
-            var smoothing = patch.SmoothingLayer?.Source as VirtualLayer;
-            plan.AllLayers = allLayers;
-            plan.Smoothing = smoothing;
-            plan.SmoothingInfo = smoothing != null && infos.TryGetValue(smoothing, out var info) ? info : null;
-            plan.Binary = BinaryParameters(descriptor, controllers);
-
-            // Forwarded inputs, and their OSCmooth copies when only the smoothing layer writes them. The copies settle
-            // on the forwarded value; the baked part follows the input directly, without OSCmooth's smoothing.
-            var inputs = new Dictionary<string, ForwardTarget>(StringComparer.Ordinal);
-            foreach (var t in patch.Targets) inputs[t.Parameter] = t;
-            if (smoothing != null && infos.TryGetValue(smoothing, out var smoothingInfo))
+            var plan = new Plan { Root = root, Fx = fx, Descriptor = descriptor, Patch = patch, Survey = survey };
+            plan.Notes.AddRange(survey.Notes);
+            var problem = SmoothingProblem(plan);
+            if (problem != null)
             {
-                foreach (var t in patch.Targets)
-                {
-                    var proxy = FermataProfile.ProxyPrefix + t.Parameter;
-                    if (smoothingInfo.Writes.Contains(proxy) && smoothingInfo.Reads.Contains(t.Parameter)
-                        && infos.All(kv => kv.Key == smoothing || !kv.Value.Writes.Contains(proxy)))
-                        inputs[proxy] = t;
-                }
+                plan.Notes.Add(problem);
+                return plan;
             }
-            var rest = new Dictionary<ForwardTarget, float>();
+
+            plan.Binary = BinaryParameters(descriptor, controllers);
+            plan.Rest = new Dictionary<ForwardTarget, float>();
             foreach (var t in patch.Targets)
             {
                 var value = NativeExpression.Evaluate(t.Expression);
-                if (value.HasValue) rest[t] = Mathf.Clamp(value.Value, -1f, 1f);
+                if (value.HasValue) plan.Rest[t] = Mathf.Clamp(value.Value, -1f, 1f);
             }
-
-            var controlled = new HashSet<int>();
-            foreach (var layer in allLayers)
-            foreach (var node in layer.AllReachableNodes())
+            foreach (var (layer, state) in survey.FaceLayers)
             {
-                var behaviours = node is VirtualState s ? s.Behaviours : node is VirtualStateMachine m ? m.Behaviours : null;
-                if (behaviours == null) continue;
-                foreach (var control in behaviours.OfType<VRCAnimatorLayerControl>())
-                    if (control && control.playable == VRC_AnimatorLayerControl.BlendableLayer.FX)
-                        controlled.Add(control.layer);
-            }
-            var named = new HashSet<string>(infos.Values.SelectMany(i => i.NamedLayerTargets), StringComparer.Ordinal);
-
-            foreach (var layer in fx.Layers)
-            {
-                if (layer == smoothing) continue;
-                var state = SingleState(layer);
-                if (state == null || !BlendTreeTerms.Parameters(state.Motion).Any(inputs.ContainsKey)) continue;
-                var problem = LayerProblem(layer, state, controlled, named);
-                if (problem != null)
-                {
-                    plan.Notes.Add($"layer '{layer.Name}' {problem}");
-                    continue;
-                }
                 BlendTreeTerms.Detach(state);
                 plan.Layers.Add(new LayerBake { Layer = layer, State = state, Before = BlendTreeTerms.Analyze(state, plan.Binary) });
             }
-            plan.Inputs = inputs;
-            plan.Rest = rest;
             plan.Reserved = DescriptorShapes(root, descriptor);
-            foreach (var state in SmoothingStates(plan))
-            foreach (var slot in BlendTreeTerms.Slots(state))
-            foreach (var b in slot.Clip?.GetFloatCurveBindings() ?? Enumerable.Empty<EditorCurveBinding>())
-                if (b.type == typeof(Animator) && string.IsNullOrEmpty(b.path) && inputs.TryGetValue(b.propertyName, out var copyOf) && b.propertyName != copyOf.Parameter)
-                    plan.SmoothingCurves[copyOf] = (plan.SmoothingCurves.TryGetValue(copyOf, out var n) ? n : 0) + 1;
-            var writes = allLayers.ToDictionary(l => l, BlendshapeWrites);
+            var writes = plan.AllLayers.ToDictionary(l => l, BlendshapeWrites);
             foreach (var bake in plan.Layers)
-                bake.Elsewhere = new HashSet<(string, string)>(allLayers.Where(l => l != bake.Layer).SelectMany(l => writes[l]));
+                bake.Elsewhere = new HashSet<(string, string)>(plan.AllLayers.Where(l => l != bake.Layer).SelectMany(l => writes[l]));
             return plan;
         }
 
-        static IEnumerable<VirtualState> SmoothingStates(Plan plan) =>
-            plan.Smoothing?.StateMachine?.AllStates() ?? Enumerable.Empty<VirtualState>();
+        /// <summary>
+        /// Why OSCmooth's smoothing can't be switched off (null when it can): something outside the smoothing layer
+        /// reads a parameter that only the smoothing layer writes and that no forward could write directly instead.
+        /// </summary>
+        static string SmoothingProblem(Plan plan)
+        {
+            if (plan.Smoothing == null || plan.SmoothingInfo == null) return null;
+            var reads = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var layer in plan.AllLayers.Where(l => l != plan.Smoothing))
+                reads.UnionWith(LiveReads(layer));
+            var stranded = plan.SmoothingInfo.Writes
+                .Where(p => reads.Contains(p) && !(plan.Inputs.TryGetValue(p, out var t) && p == FermataProfile.ProxyPrefix + t.Parameter))
+                .OrderBy(p => p, StringComparer.Ordinal).ToList();
+            return stranded.Count == 0 ? null
+                : $"OSCmooth can't be turned off: '{plan.Smoothing.Name}' also writes {string.Join(", ", stranded.Select(p => $"'{p}'"))}, which other layers read";
+        }
+
+        /// <summary>
+        /// Forwards write the copies FermataFT's blend trees read, instead of OSCmooth's inputs, and the smoothing
+        /// layer goes. When a layer control or FermataFT's named control refers to it, it stays but plays nothing.
+        /// </summary>
+        static void DisableSmoothing(Plan plan)
+        {
+            var smoothing = plan.Smoothing;
+            if (smoothing == null) return;
+            var behaviors = plan.Descriptor.faceTrackingParameterBehaviors ?? new List<VRCAvatarDescriptor.FaceTrackingParameterBehavior>();
+            foreach (var target in plan.Patch.Targets)
+            {
+                var proxy = FermataProfile.ProxyPrefix + target.Parameter;
+                if (!plan.Inputs.ContainsKey(proxy)) continue;
+                foreach (var b in behaviors)
+                    if (b != null && b.targetMode == VRCAvatarDescriptor.ParameterBehaviorTargetMode.ForwardToAnimator && b.outputParameterName == target.Parameter)
+                        b.outputParameterName = proxy;
+            }
+
+            plan.SmoothingCurves = Count(smoothing.StateMachine?.AllStates().Select(s => s.Motion) ?? Enumerable.Empty<VirtualMotion>()).Curves;
+            if (plan.Survey.Controlled.Contains(smoothing.VirtualLayerIndex) || plan.Survey.Named.Contains(smoothing.Name))
+            {
+                foreach (var state in smoothing.StateMachine?.AllStates() ?? Enumerable.Empty<VirtualState>())
+                    state.Motion = null;
+            }
+            else
+            {
+                plan.Fx.RemoveLayer(smoothing);
+            }
+            plan.SmoothingRemoved = true;
+        }
 
         /// <summary>Analyses the layers as they are now and selects more terms with whatever budget is left.</summary>
         static List<Candidate> SelectRound(Plan plan)
@@ -661,10 +772,10 @@ namespace Maberikku.FermataNativeFT.Editor
         static string Num(float v) => v.ToString("0.######", CultureInfo.InvariantCulture);
 
         /// <summary>
-        /// Picks terms by how much animator work they remove per instruction, until the next one would exceed a native
-        /// face tracking limit: the curves they take out of the blend tree, plus, when a term is the last reader of a
-        /// forwarded input, that input's OSCmooth curves, with its forward's instructions counted back. Ties go to the
-        /// term that moves the mesh more. Terms that share a driver and gate share its behavior and blendshape.
+        /// Picks terms by the curves they take out of the blend tree per instruction, until the next one would exceed a
+        /// native face tracking limit. When a term is the last reader of a forwarded input, the forward's instructions
+        /// count back. Ties go to the term that moves the mesh more. Terms that share a driver and gate share its
+        /// behavior and blendshape.
         /// </summary>
         static List<Candidate> Select(Plan plan, List<Candidate> candidates, HashSet<ForwardTarget> blocked)
         {
@@ -702,9 +813,8 @@ namespace Maberikku.FermataNativeFT.Editor
                     var newMesh = meshes.Contains(c.Source.Renderer) ? 0 : 1;
                     if (added.Count > behaviorBudget || instructions > instructionBudget || newGate > setBudget || meshes.Count + newMesh > MaxMeshes) continue;
                     var freed = c.Targets.Where(t => !blocked.Contains(t) && readers[t] == 1).ToList();
-                    var gain = c.Curves + freed.Sum(t => plan.SmoothingCurves.TryGetValue(t, out var n) ? n : 0);
                     var cost = Math.Max(1, instructions - freed.Sum(t => t.Instructions) + 1);
-                    var rank = ((float)gain / cost, c.Movement);
+                    var rank = ((float)c.Curves / cost, c.Movement);
                     if (rank.Item1 > bestRank.Score || (rank.Item1 == bestRank.Score && rank.Movement > bestRank.Movement))
                     {
                         best = c;
@@ -782,8 +892,10 @@ namespace Maberikku.FermataNativeFT.Editor
             foreach (var target in plan.Patch.Targets)
             {
                 if (needed.Contains(target.Parameter) || !plan.SmoothingInfo.Reads.Contains(target.Parameter) || plan.Trimmed.Contains(target)) continue;
+                // With OSCmooth off, the forward writes the copy instead.
                 var index = behaviors.FindIndex(b => b != null && b.targetMode == VRCAvatarDescriptor.ParameterBehaviorTargetMode.ForwardToAnimator
-                                                     && b.outputParameterName == target.Parameter);
+                                                     && (b.outputParameterName == target.Parameter
+                                                         || b.outputParameterName == FermataProfile.ProxyPrefix + target.Parameter));
                 if (index < 0) continue;
                 behaviors.RemoveAt(index);
                 plan.Trimmed.Add(target);
@@ -958,10 +1070,10 @@ namespace Maberikku.FermataNativeFT.Editor
         /// whatever the weights are. FermataFT writes the avatar's own expression shapes to 0 like this in dozens of
         /// clips. Their curves are replaced by one constant clip that always plays, so the layer still animates them.
         /// </summary>
-        static int FoldZeros(Plan plan, LayerBake bake)
+        static HashSet<(string, string)> FoldZeros(VirtualAnimatorController fx, Transform root, VirtualState state)
         {
             var zeroOnly = new Dictionary<(string, string), bool>();
-            var slots = BlendTreeTerms.Slots(bake.State).ToList();
+            var slots = BlendTreeTerms.Slots(state).ToList();
             foreach (var slot in slots)
             {
                 var clip = slot.Clip;
@@ -973,8 +1085,8 @@ namespace Maberikku.FermataNativeFT.Editor
                     zeroOnly[shape] = (!zeroOnly.TryGetValue(shape, out var soFar) || soFar) && zero;
                 }
             }
-            var fold = new HashSet<(string, string)>(zeroOnly.Where(kv => kv.Value && RestsAtZero(plan.Root, kv.Key)).Select(kv => kv.Key));
-            if (fold.Count == 0) return 0;
+            var fold = new HashSet<(string, string)>(zeroOnly.Where(kv => kv.Value && RestsAtZero(root, kv.Key)).Select(kv => kv.Key));
+            if (fold.Count == 0) return fold;
 
             foreach (var slot in slots)
             {
@@ -991,21 +1103,21 @@ namespace Maberikku.FermataNativeFT.Editor
             var constant = VirtualClip.Create(NamePrefix + "Zero");
             foreach (var (path, name) in fold.OrderBy(s => s.Item1, StringComparer.Ordinal).ThenBy(s => s.Item2, StringComparer.Ordinal))
                 constant.SetFloatCurve(path, typeof(SkinnedMeshRenderer), BlendTreeTerms.BlendShapePrefix + name, AnimationCurve.Constant(0f, 1f / 60f, 0f));
-            EnsureOne(plan.Fx);
+            EnsureOne(fx);
             var always = new VirtualBlendTree.VirtualChildMotion { Motion = constant, DirectBlendParameter = OneParameter };
-            if (bake.State.Motion is VirtualBlendTree root && root.BlendType == BlendTreeType.Direct && !root.NormalizedBlendValues)
+            if (state.Motion is VirtualBlendTree top && top.BlendType == BlendTreeType.Direct && !top.NormalizedBlendValues)
             {
-                root.Children = root.Children.Add(always);
+                top.Children = top.Children.Add(always);
             }
             else
             {
                 var wrapper = VirtualBlendTree.Create(NamePrefix + "Root");
                 wrapper.BlendType = BlendTreeType.Direct;
                 wrapper.Children = ImmutableList.Create(
-                    new VirtualBlendTree.VirtualChildMotion { Motion = bake.State.Motion, DirectBlendParameter = OneParameter }, always);
-                bake.State.Motion = wrapper;
+                    new VirtualBlendTree.VirtualChildMotion { Motion = state.Motion, DirectBlendParameter = OneParameter }, always);
+                state.Motion = wrapper;
             }
-            return fold.Count;
+            return fold;
         }
 
         static bool RestsAtZero(Transform root, (string Path, string Name) shape)
@@ -1056,27 +1168,6 @@ namespace Maberikku.FermataNativeFT.Editor
                     return tree;
                 default:
                     return null;
-            }
-        }
-
-        /// <summary>Takes the OSCmooth copies of dropped forwards out of the smoothing layer: nothing reads them any more.</summary>
-        static void PruneSmoothing(Plan plan, VirtualClip empty)
-        {
-            if (plan.Smoothing == null || plan.Trimmed.Count == 0) return;
-            var unread = new HashSet<string>(plan.Trimmed.Select(t => FermataProfile.ProxyPrefix + t.Parameter), StringComparer.Ordinal);
-            foreach (var state in SmoothingStates(plan).ToList())
-            {
-                BlendTreeTerms.Detach(state);
-                foreach (var slot in BlendTreeTerms.Slots(state))
-                {
-                    var clip = slot.Clip;
-                    var hits = clip.GetFloatCurveBindings().Where(b => b.type == typeof(Animator) && string.IsNullOrEmpty(b.path) && unread.Contains(b.propertyName)).ToList();
-                    if (hits.Count == 0) continue;
-                    var copy = clip.Clone();
-                    foreach (var b in hits) copy.SetFloatCurve(b, null);
-                    slot.SetClip(copy);
-                }
-                state.Motion = Prune(state.Motion, empty);
             }
         }
 

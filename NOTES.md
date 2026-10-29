@@ -11,6 +11,12 @@ Facts this tool relies on, where they were verified, and what is still open. Che
   3. Expression parameters: drop parameters only the binary layer read (the sync bits); keep each forwarded `v2/*` input as an unsynced entry.
   4. Enable native face tracking (*Use All Tracking Keys*) and add one behavior per input.
   5. Self-check that nothing else in FX or the expression parameters changed.
+  6. Fold zero overrides in FermataFT's face layers and prune what's left empty (below), with its own self-check.
+- Zero folding (every build): a blendshape that a single-state Write Defaults blend-tree layer only ever sets to 0, and that rests at 0 on its renderer, comes out of the layer as 0 at any weights.
+  - A Direct blend adds each child's change from the default, so an always-on child setting those shapes to 0 changes nothing else. Their curves are replaced by one constant clip on the Direct root, played at a constant-1 parameter (or the root is wrapped in such a Direct tree).
+  - Subtrees left animating nothing are pruned. A dead Direct child goes; a dead 1D or 2D child becomes an empty clip, because its threshold still shapes its siblings' weights.
+  - The self-check analyses the layer again: every other blendshape keeps exactly its terms, and the layer still animates every folded shape.
+  - On Chocolat, FacialTracking evaluates 1,059 curves in 118 blend tree nodes. Only 243 curves are face tracking shapes; 776 set 158 of the avatar's own expression shapes to 0, copied into dozens of clips; 40 move the ear bones.
 - Forward targets are discovered, not hard-coded: every `v2/*` parameter that a remaining layer reads.
 - `PatchPlanner` holds every check and is shared by the inspector (on the original controllers) and the build (on NDMF virtual controllers).
 - FermataFT is detected by its `ftSet` component (matched by type name) or by the OSCmooth layers in FX, which covers older installs that edited the avatar FX directly.
@@ -36,14 +42,16 @@ Facts this tool relies on, where they were verified, and what is still open. Che
   - On Chocolat this cut the cost of baking every exact term from about 1,790 to 1,340 instructions.
   - Radial puppets stay continuous. Plum's Type A/B (`TypeSelect`, a radial) is a continuous gate: shapes where the two types differ carry both branches at once, each scaled by its own set.
 - Forward trimming: after a round, a FermataFT input whose value, and whose OSCmooth copy, no layer outside the smoothing layer still reads loses its forward behavior. "Reads" counts transition conditions, state behaviours and state parameters, and blend tree parameters only where the subtree still animates something. Extra custom forwards are never dropped. The freed behaviors and instructions go to the next round, up to 8 rounds.
-- Goal: less animator work per frame. On Chocolat, FacialTracking evaluates 1,059 curves in 118 blend tree nodes. Only 243 of those curves are face tracking shapes; 776 write 0 to the avatar's own expression shapes (158 distinct shapes, copied into dozens of clips), and 40 move the ear bones.
-- Zero folding: a blendshape the layer only ever sets to 0, and that rests at 0 on its renderer, comes out of a Write Defaults blend tree as 0 at any weights. A Direct blend adds each child's change from the default, so adding an always-on child that sets it to 0 changes nothing else. Its curves are replaced by one constant clip on the Direct root, played at a constant-1 parameter (or the root is wrapped in such a Direct tree).
-- Pruning: once terms are baked, subtrees that animate nothing are removed. A dead Direct child goes; a dead 1D or 2D child becomes an empty clip, because its threshold still shapes its siblings' weights. The smoothing layer's branches for dropped forwards go the same way.
-- Budget: terms are ranked by animator work removed per instruction: the curves they take out of the tree, plus, when a term is the last reader of a forwarded input (nothing that isn't a candidate reads it), that input's OSCmooth curves, with the forward's instructions counted back. Ties go to mesh displacement. Terms are taken until the next would pass 128 behaviors, 512 instructions, 128 sets or 16 face tracking meshes.
-- Projection for Chocolat (Python model of the tree): with the single- and two-input terms approximated by per-key shapes, and the 3+-input terms ranked as above, FacialTracking drops to about 295 curves and the smoothing layer from 240 to about 152, at 477 of 512 instructions. The approximation layer isn't built yet; the build reports the real numbers.
+- Goal: less animator work per frame.
+- OSCmooth off: once any term is native, the animator part must see the same values at the same time, so forwards write the copies the blend trees read (`OSCm/Proxy/<input>`) and the smoothing layer is removed (or emptied, if a layer control or FermataFT's named control refers to it).
+  - The bake is skipped before it changes anything if something else reads a parameter that only the smoothing layer writes and that no forward could write.
+  - With nothing native, OSCmooth stays.
+- Pruning: after baking, subtrees that animate nothing are removed, as for zero folding.
+- Budget: terms are ranked by the curves they take out of the tree per instruction. When a term is the last reader of a forwarded input (nothing that isn't a candidate reads it), the forward's instructions count back. Ties go to mesh displacement. Terms are taken until the next would pass 128 behaviors, 512 instructions, 128 sets or 16 face tracking meshes.
+- Projection for Chocolat (Python model of the tree): with the single- and two-input terms approximated by per-key shapes, and the 3+-input terms ranked as above, FacialTracking drops to about 295 curves (zero folding included) at 477 of 512 instructions, with OSCmooth's 240 curves gone. The approximation layer isn't built yet; the build reports the real numbers.
 - Editing: the layer's blend trees are copied so no clip slot is shared, and clips are cloned per slot before their bindings are removed. A self-check analyses the layer again: every blendshape must keep exactly its unbaked terms, and no dropped forward may still be read.
 - Avatar Optimizer ignores the descriptor's face tracking mappings and would freeze the baked shapes. `FermataNativeFTBakedShapes` plus a `ComponentInformation` declares them modified and follows renames and mesh merges into the descriptor. That assembly only compiles with AAO 1.7 or later, and the component is removed after AAO.
-- Known differences from the animator: baked parts follow the input directly, without OSCmooth's smoothing, and a gate change reaches the set weight a frame or two later.
+- Known differences from plain forwarding: no smoothing anywhere on the face, and a gate change reaches the set weight a frame or two later.
 
 ## VRChat SDK (Avatars 3.10.6-beta.4)
 

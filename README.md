@@ -30,8 +30,9 @@ If the avatar has no FermataFT face tracking, the bridge warns and does nothing.
 - FermataFT's `v2/*` sync parameters are removed from the expression parameters. The `v2/*` inputs that OSCmooth reads stay as local (unsynced) parameters.
 - Face tracking is enabled on the avatar descriptor (*Use All Tracking Keys*), with one *Forward to Animator* parameter behavior per input. Each behavior computes the same value VRCFaceTracking would have sent, from VRChat's tracking keys. Every client, local and remote, computes these values itself.
 - Eyes: VRChat derives the gaze and blink tracking keys from its own eye look, which any *Tracking Control* that sets eyes to *Animation* turns off. FermataFT does that whenever its face tracking drives the eyes, and during gestures. Those states set eyes to *Tracking* instead, and the descriptor's *Eye Gaze Mode* and *Eyelids* are set to *Face Tracking*, so VRChat's eye look feeds FermataFT without moving the eye bones or blinking on its own.
+- Less animator work, same result: FermataFT's face blend tree sets many of the avatar's own expression shapes to 0 in dozens of clips at once. Those curves are merged into one clip that always plays, and the parts of the tree left with nothing to animate are removed. On Chocolat this takes the face layer from 1,059 curves to under 300.
 
-Everything else stays as FermataFT built it: OSCmooth smoothing (including its separate local and remote smoothing), the face blend trees, menus, toggles, gestures and their sync. The build checks this and stops if anything else would change.
+Everything else stays as FermataFT built it: OSCmooth smoothing (including its separate local and remote smoothing), the face blend trees' results, menus, toggles, gestures and their sync. The build checks this and stops if anything else would change.
 
 The avatar's own files are never modified; all changes happen on NDMF's build copy.
 
@@ -50,13 +51,13 @@ The result is clamped to −1..1. A single key on its own is forwarded directly,
 
 Off by default. With **Bake Exact Shapes** on, the parts of FermataFT's face that native face tracking can reproduce exactly move onto new blendshapes that it drives directly. Everything else keeps running in FermataFT's animator on the forwarded inputs, which stay exactly as described above. Turn the option off to go back to plain forwarding.
 
-The aim is less work for the animator each frame. The bake picks what removes the most blend tree per instruction, folds FermataFT's many clips that set the avatar's own expression shapes to 0 into one, and prunes whatever no longer animates anything.
+The aim is less work for the animator each frame. The bake picks what removes the most blend tree per instruction, and prunes whatever no longer animates anything.
 
 - **What is baked:** blendshape movements that FermataFT's blend trees compute from tracking through straight-line segments, for example brows, eye wide, squint, smile and sad, cheeks, and, as the instruction budget allows, blink and jaw. Shapes that move together share one baked shape.
 - **Toggles keep working:** the eye and lip tracking toggles, gesture fades, Eye Lid LR Sync and Quest Pro mode still apply to baked shapes. The animator works out their effect and hands it to native face tracking as Blendshapes Set weights.
 - **What is not baked:** 2D blends (eye gaze, tongue direction), shapes another layer also animates, and anything that would pass VRChat's limits (512 instructions, 128 behaviors).
 - **Inputs nothing reads any more:** after baking, a forwarded input that FermataFT's animator no longer reads is not forwarded, and the bake uses the instructions it saves.
-- **Differences:** baked shapes skip OSCmooth's smoothing, and they follow a toggle a frame or two later.
+- **No smoothing:** once anything is baked, OSCmooth's smoothing is switched off for the whole face. The forwarded inputs then feed FermataFT's blend trees directly, so the baked and animated parts move together. Baked shapes follow a toggle a frame or two later.
 - **Where to see results:** the NDMF console shows a summary line, and the Unity console lists every baked shape.
 
 With Avatar Optimizer installed, the bake tells it that native face tracking drives the baked shapes, so they are kept.

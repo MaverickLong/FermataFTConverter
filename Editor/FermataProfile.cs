@@ -21,7 +21,10 @@ namespace Maberikku.FermataNativeFT.Editor
         /// <summary>OSCmooth layer that decodes the bit-packed remote sync into v2 values. Replaced by native forwarding.</summary>
         public const string BinaryDecodeLayer = "_OSCmooth_Binary_Gen";
 
-        /// <summary>OSCmooth smoothing layer. Kept untouched; it now smooths the natively forwarded values.</summary>
+        /// <summary>
+        /// OSCmooth smoothing layer. Plain forwarding keeps it, smoothing the natively forwarded values. When the shape
+        /// bake moves anything native it goes, so the animator sees the same values as the native shapes.
+        /// </summary>
         public const string SmoothingLayer = "_OSCmooth_Smoothing_Gen";
 
         /// <summary>FermataFT's animator flag for "face tracking drives the eyes".</summary>
