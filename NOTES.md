@@ -13,10 +13,11 @@ Facts this tool relies on, where they were verified, and what is still open. Che
   5. Self-check that nothing else in FX or the expression parameters changed.
   6. Fold zero overrides in FermataFT's face layers and prune what's left empty (below), with its own self-check.
 - Zero folding (every build): a blendshape that a single-state Write Defaults blend-tree layer only ever sets to 0, and that rests at 0 on its renderer, comes out of the layer as 0 at any weights.
-  - A Direct blend adds each child's change from the default, so an always-on child setting those shapes to 0 changes nothing else. Their curves are replaced by one constant clip on the Direct root, played at a constant-1 parameter (or the root is wrapped in such a Direct tree).
+  - A Direct blend adds each child's change from the default, so an always-on child setting those shapes to 0 changes nothing else. Their curves are replaced by one constant clip on the Direct root, played at `FNFT/One` (a float added with default 1 that nothing writes). When the root isn't a Direct tree, it is wrapped in one; Plum's root is a 1D tree on `TypeSelect`.
   - Subtrees left animating nothing are pruned. A dead Direct child goes; a dead 1D or 2D child becomes an empty clip, because its threshold still shapes its siblings' weights.
-  - The self-check analyses the layer again: every other blendshape keeps exactly its terms, and the layer still animates every folded shape.
+  - The self-check analyses the layer again: every other blendshape keeps exactly its terms, and the layer still animates every folded shape. The analysis takes a weight on `FNFT/One` as 1, so the wrapper doesn't count as a change.
   - On Chocolat, FacialTracking evaluates 1,059 curves in 118 blend tree nodes. Only 243 curves are face tracking shapes; 776 set 158 of the avatar's own expression shapes to 0, copied into dozens of clips; 40 move the ear bones.
+  - On Plum, folding 182 shapes takes FacialTracking from 2,321 to 807 curves. Nothing is pruned: the subtrees that would empty (`MouthDefaultCorrection`, once per type) also set a shape that doesn't rest at 0, which can't be folded.
 - Forward targets are discovered, not hard-coded: every `v2/*` parameter that a remaining layer reads.
 - `PatchPlanner` holds every check and is shared by the inspector (on the original controllers) and the build (on NDMF virtual controllers).
 - FermataFT is detected by its `ftSet` component (matched by type name) or by the OSCmooth layers in FX, which covers older installs that edited the avatar FX directly.

@@ -308,9 +308,11 @@ namespace Maberikku.FermataNativeFT.Editor
                         for (var i = 0; i < children.Count; i++)
                         {
                             if (!results[i].TryGetValue(shape, out var childTerms)) continue;
+                            // This tool's always-on children (see ShapeBake.Fold) are weighted by a parameter that is always 1.
+                            var always = children[i].DirectBlendParameter == ShapeBake.OneParameter;
                             foreach (var t in childTerms)
                                 terms.Add(normalized ? Term.MakeOpaque("normalised Direct blend tree", t.Occurrences)
-                                    : Times(t, Factor.Weight(children[i].DirectBlendParameter), binary));
+                                    : always ? t : Times(t, Factor.Weight(children[i].DirectBlendParameter), binary));
                         }
                         output[shape] = Normalize(terms);
                     }

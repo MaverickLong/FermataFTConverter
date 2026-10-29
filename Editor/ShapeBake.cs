@@ -136,7 +136,8 @@ namespace Maberikku.FermataNativeFT.Editor
     internal static class ShapeBake
     {
         const string NamePrefix = "FNFT/";
-        const string OneParameter = NamePrefix + "One";
+        /// <summary>A float this tool adds with default 1 and never writes, for Direct children that always play.</summary>
+        internal const string OneParameter = NamePrefix + "One";
         const string GatePrefix = NamePrefix + "Gate/";
         const string ConstPrefix = NamePrefix + "Const/";
         const int MaxSets = 128;
@@ -1130,8 +1131,7 @@ namespace Maberikku.FermataNativeFT.Editor
 
         static void EnsureOne(VirtualAnimatorController fx)
         {
-            if (!fx.Parameters.ContainsKey(OneParameter))
-                fx.SetParameter(OneParameter, new AnimatorControllerParameter { name = OneParameter, type = AnimatorControllerParameterType.Float, defaultFloat = 1f });
+            fx.SetParameter(OneParameter, new AnimatorControllerParameter { name = OneParameter, type = AnimatorControllerParameterType.Float, defaultFloat = 1f });
         }
 
         /// <summary>
