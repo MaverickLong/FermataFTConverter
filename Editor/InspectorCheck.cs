@@ -38,19 +38,19 @@ namespace Maberikku.FermataNativeFT.Editor
 
             if (!descriptor)
             {
-                report.Findings.Add(new Finding(Severity.Error, "This must be placed inside an avatar (under its VRC Avatar Descriptor)."));
+                report.Findings.Add(new Finding(Severity.Error, "This prefab must be placed inside an avatar."));
                 return report;
             }
 
             var markers = descriptor.GetComponentsInChildren<FermataNativeFTBridge>(true)
                 .Count(m => m.GetComponentInParent<VRCAvatarDescriptor>(true) == descriptor);
             if (markers > 1)
-                report.Findings.Add(new Finding(Severity.Info, $"This avatar has {markers} {Messages.Title} components; one is enough."));
+                report.Findings.Add(new Finding(Severity.Info, $"This avatar has {markers} {Messages.Title} components (one is enough)."));
 
             var settings = FermataProfile.FindSettings(descriptor);
             if (settings.Count > 1)
             {
-                report.Findings.Add(new Finding(Severity.Error, "This avatar has more than one FermataFT prefab. FermataFT itself cannot build that; keep exactly one."));
+                report.Findings.Add(new Finding(Severity.Error, "This avatar has more than one FermataFT prefab (one is enough)."));
                 return report;
             }
 
@@ -63,7 +63,7 @@ namespace Maberikku.FermataNativeFT.Editor
                     return report;
                 }
                 report.Findings.Add(new Finding(Severity.Info,
-                    "No FermataFT prefab was found, but the avatar's FX already contains FermataFT's OSCmooth layers " +
+                    "No FermataFT prefab was found, but the avatar's FX contains FermataFT's OSCmooth layers " +
                     "(an older install that edited the FX directly). Those layers will be patched."));
             }
 

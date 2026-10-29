@@ -116,16 +116,14 @@ namespace Maberikku.FermataNativeFT.Editor
                 BridgeError.Report(ErrorSeverity.NonFatal, "VRChat SDK: " + warning);
 
             var custom = plan.Targets.Count(t => t.SingleKey == null);
-            BridgeError.Report(ErrorSeverity.Information,
-                $"Native face tracking now drives {plan.Targets.Count} FermataFT inputs ({custom} custom expressions, " +
-                $"about {plan.ExistingInstructions + plan.NewInstructions}/{NativeExpression.MaxInstructions} instructions). " +
-                $"Removed FX layer '{FermataProfile.BinaryDecodeLayer}' and {removed.Count} sync parameters; " +
-                $"synced bits {bitsBefore} -> {bitsAfter}. " +
-                (plan.UnlockEyes
-                    ? $"Eye input stays on in {plan.EyeLockStates.Count} states that locked the eyes, " +
-                      "with Eye Gaze Mode and Eyelids set to Face Tracking. "
-                    : "") +
-                "OSCmooth smoothing and all other FermataFT settings are unchanged.");
+            // BridgeError.Report(ErrorSeverity.Information,
+            //     $"FermataFT Inputs: {plan.Targets.Count}" +
+            //     $"Custom Expressions: {custom}" +
+            //     $"Instructions: {plan.ExistingInstructions + plan.NewInstructions}/{NativeExpression.MaxInstructions}" +
+            //     $"Removed FX layer: '{FermataProfile.BinaryDecodeLayer}'" +
+            //     $"Removed Synced Parameters: {removed.Count} " +
+            //     $"Synced bits: {bitsBefore} -> {bitsAfter}" +
+            //     $"Eye Lock States: {plan.EyeLockStates.Count}");
         }
 
         /// <summary>

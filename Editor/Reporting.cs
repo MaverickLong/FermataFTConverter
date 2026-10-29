@@ -9,13 +9,11 @@ namespace Maberikku.FermataNativeFT.Editor
         public const string Title = "Fermata Native FT Bridge";
 
         public const string Intro =
-            "Runs FermataFT on VRChat native face tracking. At upload, native tracking values are fed into FermataFT's " +
-            "OSCmooth smoothing, and FermataFT's OSC parameter sync is removed. FermataFT's settings, menus and " +
-            "blend trees are kept as they are.";
+            "Drives FermataFT paremeters via VRChat native face tracking.";
 
         public const string NoFermata =
-            "No FermataFT face tracking was found on this avatar (no FermataFT prefab, and no OSCmooth layers in its FX), " +
-            "so this bridge does nothing. Add FermataFT to the avatar, or remove this prefab.";
+            "No FermataFT was found on this avatar." +
+            "Add FermataFT to the avatar, or remove this prefab.";
     }
 
     /// <summary>An NDMF console entry.</summary>

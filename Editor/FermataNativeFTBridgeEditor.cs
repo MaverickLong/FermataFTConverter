@@ -66,21 +66,13 @@ namespace Maberikku.FermataNativeFT.Editor
             {
                 var custom = plan.Targets.Count(t => t.SingleKey == null);
                 EditorGUILayout.HelpBox(
-                    $"Ready. At upload, native face tracking will drive {plan.Targets.Count} FermataFT inputs " +
-                    $"({custom} custom expressions, about {plan.ExistingInstructions + plan.NewInstructions} of " +
-                    $"{NativeExpression.MaxInstructions} instructions). Layer '{FermataProfile.BinaryDecodeLayer}' will be removed " +
-                    $"and about {_report.SyncedBitsFreed} synced parameter bits freed. OSCmooth smoothing and all other " +
-                    "FermataFT settings stay as they are.",
+                    $"FermataFT Inputs: {plan.Targets.Count}\n" +
+                    $"Custom Expressions: {custom}\n" +
+                    $"Instructions: {plan.ExistingInstructions + plan.NewInstructions}/{NativeExpression.MaxInstructions}\n" +
+                    $"Removed FX layer: '{FermataProfile.BinaryDecodeLayer}'\n" +
+                    $"Removed Synced Parameters: {_report.SyncedBitsFreed}\n" +
+                    $"Eye Lock States: {plan.EyeLockStates.Count}\n",
                     MessageType.Info);
-
-                if (plan.UnlockEyes)
-                {
-                    EditorGUILayout.HelpBox(
-                        $"For native eye tracking, the {plan.EyeLockStates.Count} animator states that lock the eyes " +
-                        "(FermataFT's eye tracking and gesture states) keep VRChat's eye input on, and the avatar's Eye Gaze " +
-                        "Mode and Eyelids are set to Face Tracking. With FermataFT's Eye Tracking menu toggle off, the eyes stay still.",
-                        MessageType.Info);
-                }
 
                 _showTargets = EditorGUILayout.Foldout(_showTargets, "Forwarded inputs", true);
                 if (_showTargets)
