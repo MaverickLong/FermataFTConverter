@@ -34,6 +34,15 @@ namespace Maberikku.FermataNativeFT.Editor
             {
                 seq.Run("Forward native face tracking into FermataFT", BridgePass.Execute);
             });
+
+            // The list of baked blendshapes only exists for Avatar Optimizer (see FermataNativeFTBakedShapes).
+            InPhase(BuildPhase.Optimizing)
+                .AfterPlugin("com.anatawa12.avatar-optimizer")
+                .Run("Remove the baked blendshape list", context =>
+                {
+                    foreach (var list in context.AvatarRootObject.GetComponentsInChildren<FermataNativeFTBakedShapes>(true))
+                        Object.DestroyImmediate(list);
+                });
         }
     }
 
@@ -116,6 +125,9 @@ namespace Maberikku.FermataNativeFT.Editor
                     BridgeError.Report(ErrorSeverity.Error, "Self-check failed, FermataFT's configuration would not be preserved: " + problem);
                 return;
             }
+
+            if (markers.Any(m => m.bakeExactShapes))
+                ShapeBake.Run(context, fx, controllers.Values.Where(c => c != null).Distinct().ToList(), plan, descriptor);
 
             // The SDK only validates the scene avatar, never the behaviors added here, so surface its warnings now.
             foreach (var warning in FaceTrackingExpressionValidator.CollectWarnings(descriptor))

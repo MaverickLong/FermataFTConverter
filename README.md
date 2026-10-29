@@ -46,6 +46,18 @@ Expressions can use:
 
 The result is clamped to −1..1. A single key on its own is forwarded directly, clamped to 0..1, and costs no instructions. VRChat allows 512 characters, 128 tokens and 64 instructions per expression, and 512 instructions per avatar. The inspector checks each expression as you type. An invalid expression stops the upload with an error.
 
+## Shape bake (experimental)
+
+Off by default. With **Bake Exact Shapes** on, the parts of FermataFT's face that native face tracking can reproduce exactly move onto new blendshapes that it drives directly. Everything else keeps running in FermataFT's animator on the forwarded inputs, which stay exactly as described above. Turn the option off to go back to plain forwarding.
+
+- **What is baked:** blendshape movements that FermataFT's blend trees compute from tracking through straight-line segments, for example brows, eye wide, squint, smile and sad, cheeks, and, as the instruction budget allows, blink and jaw. Shapes that move together share one baked shape.
+- **Toggles keep working:** the eye and lip tracking toggles, gesture fades, Eye Lid LR Sync and Quest Pro mode still apply to baked shapes. The animator works out their effect and hands it to native face tracking as Blendshapes Set weights.
+- **What is not baked:** 2D blends (eye gaze, tongue direction), shapes another layer also animates, and anything that would pass VRChat's limits (512 instructions, 128 behaviors).
+- **Differences:** baked shapes skip OSCmooth's smoothing, and they follow a toggle a frame or two later.
+- **Where to see results:** the NDMF console shows a summary line, and the Unity console lists every baked shape.
+
+With Avatar Optimizer installed, the bake tells it that native face tracking drives the baked shapes, so they are kept.
+
 ## Known limits
 
 - With FermataFT's *Eye Tracking* menu toggle off, the eyes stay still and don't blink. Leave it on: without an eye tracker, VRChat's simulated eye movement and blinking drive FermataFT's eyes instead.

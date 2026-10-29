@@ -98,6 +98,22 @@ namespace Maberikku.FermataNativeFT.Editor
             return check;
         }
 
+        /// <summary>
+        /// Evaluates an expression, with inputs missing from <paramref name="inputs"/> at 0. Null when the expression
+        /// doesn't parse or divides by zero.
+        /// </summary>
+        public static float? Evaluate(string expression, IReadOnlyDictionary<string, float> inputs = null)
+        {
+            try
+            {
+                return new Evaluator(Tokenize(expression), inputs).ParseAll();
+            }
+            catch (SyntaxError)
+            {
+                return null;
+            }
+        }
+
         enum Kind
         {
             Number,
@@ -317,6 +333,106 @@ namespace Maberikku.FermataNativeFT.Editor
                 throw new SyntaxError(match != null
                     ? $"Unknown input '{t.Text}' at position {t.Position + 1}. Names are case-sensitive: did you mean '{match}'?"
                     : $"Unknown input '{t.Text}' at position {t.Position + 1}.");
+            }
+        }
+
+        /// <summary>Evaluates the grammar that <see cref="Parser"/> checks.</summary>
+        sealed class Evaluator
+        {
+            readonly List<Token> _tokens;
+            readonly IReadOnlyDictionary<string, float> _inputs;
+            int _next;
+
+            public Evaluator(List<Token> tokens, IReadOnlyDictionary<string, float> inputs)
+            {
+                _tokens = tokens;
+                _inputs = inputs;
+            }
+
+            public float ParseAll()
+            {
+                var value = Expression();
+                if (_next < _tokens.Count) throw new SyntaxError("Unexpected token.");
+                return value;
+            }
+
+            bool Accept(string symbol)
+            {
+                if (_next >= _tokens.Count || !_tokens[_next].Is(symbol)) return false;
+                _next++;
+                return true;
+            }
+
+            float Expression()
+            {
+                var value = Term();
+                while (true)
+                {
+                    if (Accept("+")) value += Term();
+                    else if (Accept("-")) value -= Term();
+                    else return value;
+                }
+            }
+
+            float Term()
+            {
+                var value = Unary();
+                while (true)
+                {
+                    if (Accept("*"))
+                    {
+                        value *= Unary();
+                    }
+                    else if (Accept("/"))
+                    {
+                        var divisor = Unary();
+                        if (divisor == 0f) throw new SyntaxError("Division by zero.");
+                        value /= divisor;
+                    }
+                    else
+                    {
+                        return value;
+                    }
+                }
+            }
+
+            float Unary() => Accept("-") ? -Unary() : Value();
+
+            float Value()
+            {
+                if (_next >= _tokens.Count) throw new SyntaxError("Missing value.");
+                var t = _tokens[_next++];
+                switch (t.Kind)
+                {
+                    case Kind.Number:
+                        return float.Parse(t.Text, NumberStyles.Float, CultureInfo.InvariantCulture);
+                    case Kind.Name when _next < _tokens.Count && _tokens[_next].Is("("):
+                        return Call(t.Text);
+                    case Kind.Name:
+                        if (!AllInputs.Contains(t.Text)) throw new SyntaxError("Unknown input.");
+                        return _inputs != null && _inputs.TryGetValue(t.Text, out var input) ? input : 0f;
+                }
+                if (!t.Is("(")) throw new SyntaxError("Expected a value.");
+                var value = Expression();
+                if (!Accept(")")) throw new SyntaxError("Unclosed '('.");
+                return value;
+            }
+
+            float Call(string name)
+            {
+                _next++;
+                var args = new List<float>();
+                do args.Add(Expression());
+                while (Accept(","));
+                if (!Accept(")")) throw new SyntaxError("Unclosed '('.");
+                if (!FunctionArity.TryGetValue(name, out var arity) || args.Count != arity) throw new SyntaxError("Bad call.");
+                switch (name)
+                {
+                    case "abs": return Math.Abs(args[0]);
+                    case "min": return Math.Min(args[0], args[1]);
+                    case "max": return Math.Max(args[0], args[1]);
+                    default: return Math.Min(Math.Max(args[0], args[1]), args[2]);
+                }
             }
         }
     }

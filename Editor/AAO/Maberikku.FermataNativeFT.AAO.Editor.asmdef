@@ -1,0 +1,29 @@
+{
+  "name": "Maberikku.FermataNativeFT.AAO.Editor",
+  "rootNamespace": "Maberikku.FermataNativeFT.AAO",
+  "references": [
+    "Maberikku.FermataNativeFT",
+    "com.anatawa12.avatar-optimizer.api.editor",
+    "VRC.SDKBase",
+    "VRC.SDK3A"
+  ],
+  "includePlatforms": [
+    "Editor"
+  ],
+  "overrideReferences": true,
+  "precompiledReferences": [
+    "VRCSDK3A.dll",
+    "VRCSDKBase.dll"
+  ],
+  "autoReferenced": false,
+  "defineConstraints": [
+    "FERMATA_NATIVE_FT_AAO"
+  ],
+  "versionDefines": [
+    {
+      "name": "com.anatawa12.avatar-optimizer",
+      "expression": "1.7.0",
+      "define": "FERMATA_NATIVE_FT_AAO"
+    }
+  ]
+}

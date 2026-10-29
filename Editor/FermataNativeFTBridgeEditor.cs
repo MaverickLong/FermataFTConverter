@@ -49,6 +49,7 @@ namespace Maberikku.FermataNativeFT.Editor
             var root = new VisualElement();
             _status = new IMGUIContainer(DrawStatus);
             root.Add(_status);
+            root.Add(new PropertyField(serializedObject.FindProperty(nameof(FermataNativeFTBridge.bakeExactShapes)), "Bake Exact Shapes (experimental)"));
             _custom = new CustomForwardList(serializedObject, CustomForwards);
             root.Add(_custom.Root);
             root.TrackSerializedObjectValue(serializedObject, _ =>
@@ -95,7 +96,8 @@ namespace Maberikku.FermataNativeFT.Editor
                     $"Instructions: {plan.ExistingInstructions + plan.NewInstructions}/{NativeExpression.MaxInstructions}\n" +
                     $"Removed FX layer: '{FermataProfile.BinaryDecodeLayer}'\n" +
                     $"Removed Synced Parameters: {_report.SyncedBitsFreed}\n" +
-                    $"Eye Lock States: {plan.EyeLockStates.Count}\n",
+                    $"Eye Lock States: {plan.EyeLockStates.Count}\n" +
+                    $"Shape Bake: {(((FermataNativeFTBridge)target).bakeExactShapes ? "on, results in the NDMF console" : "off")}",
                     MessageType.Info);
             }
 

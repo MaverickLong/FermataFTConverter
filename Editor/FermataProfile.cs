@@ -30,6 +30,9 @@ namespace Maberikku.FermataNativeFT.Editor
         /// <summary>VRCFaceTracking parameter namespace that the smoothing layer reads.</summary>
         public const string InputPrefix = "v2/";
 
+        /// <summary>Prefix of the smoothed copy of each input that the smoothing layer writes, e.g. "OSCm/Proxy/v2/JawOpen".</summary>
+        public const string ProxyPrefix = "OSCm/Proxy/";
+
         /// <summary>
         /// FermataFT is present when its settings component is on the avatar, or, for older installs that wrote their
         /// layers straight into the avatar's FX, when the FX has its OSCmooth layers.
