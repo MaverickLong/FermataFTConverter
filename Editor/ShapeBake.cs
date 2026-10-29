@@ -276,6 +276,15 @@ namespace Maberikku.FermataNativeFT.Editor
             }
             survey.Named = new HashSet<string>(infos.Values.SelectMany(i => i.NamedLayerTargets), StringComparer.Ordinal);
 
+            // Rewriting a blend tree is exact under Write Defaults on; Unity blends unreliably when a controller mixes both.
+            var writeDefaults = fx.Layers.SelectMany(l => l.StateMachine?.AllStates() ?? Enumerable.Empty<VirtualState>())
+                .Select(s => s.WriteDefaultValues).Distinct().ToList();
+            if (writeDefaults.Contains(false))
+            {
+                survey.Notes.Add(writeDefaults.Contains(true) ? "FX mixes Write Defaults on and off" : "FX has Write Defaults off");
+                return survey;
+            }
+
             foreach (var layer in fx.Layers)
             {
                 if (layer == survey.Smoothing) continue;
@@ -294,6 +303,8 @@ namespace Maberikku.FermataNativeFT.Editor
         /// </summary>
         public static void Fold(Transform root, VirtualAnimatorController fx, Survey survey)
         {
+            foreach (var note in survey.Notes)
+                Debug.Log($"[{Messages.Title}] Zero folding skipped: {note}.");
             var none = new HashSet<string>();
             var empty = VirtualClip.Create(NamePrefix + "Empty");
             foreach (var (layer, state) in survey.FaceLayers)
@@ -527,7 +538,6 @@ namespace Maberikku.FermataNativeFT.Editor
             if (controlled.Contains(layer.VirtualLayerIndex) || named.Contains(layer.Name)) return "has its weight animated";
             var sm = layer.StateMachine;
             if (sm.AnyStateTransitions.Count > 0 || sm.EntryTransitions.Count > 0 || state.Transitions.Count > 0) return "has transitions";
-            if (!state.WriteDefaultValues) return "has Write Defaults off";
             return null;
         }
 
