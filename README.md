@@ -4,7 +4,11 @@ Runs avatars set up with **FermataFT** face tracking on **VRChat native face tra
 
 At upload, native tracking values are fed into FermataFT's OSCmooth smoothing layer, and FermataFT's OSC parameter sync (about 140–150 synced bits) is removed. VRChat syncs native face tracking itself, outside the synced-parameter budget.
 
+**This is a temporary solution that only reduces synced parameters.** It still uses the original blendtree / OSCmooth, which means the animator / CPU load remains almost the same. Plan you gimmicks / synced parameters wisely -- you may end up with a very bad performing avatar if you carelessly add more. Fermata said they are working on a Native Face Tracking solution themselves -- you may soon no longer need this utility.
+
 This is an unofficial stopgap. It is not affiliated with FermataShop / CPMEDIA, and it contains no FermataFT files: it reads your own installed copy while the avatar is being built.
+
+We implemented blendtree pruning that removes FermataFT's "Write Defaults off" compatibility animations, to reduce animator load on "Write Defaults on" avatars. This is a best-effort change and is not a conversion to Native Face Tracking.
 
 ## Requirements
 
@@ -18,7 +22,7 @@ This is an unofficial stopgap. It is not affiliated with FermataShop / CPMEDIA, 
 ## Usage
 
 1. Install FermataFT on your avatar as usual.
-2. Drag `FermataNativeFT.prefab` onto the avatar, next to FermataFT's prefab.
+2. Drag `FermataNativeFT.prefab` onto the avatar.
 3. Select it and read the inspector. It shows any problem it can find before you upload, and what it will change.
 4. Upload as usual.
 
