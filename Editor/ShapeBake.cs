@@ -310,11 +310,21 @@ namespace Maberikku.FermataNativeFT.Editor
             foreach (var (layer, state) in survey.FaceLayers)
             {
                 BlendTreeTerms.Detach(state);
+                var original = state.Motion;
+                BlendTreeTerms.Detach(state);
                 var before = BlendTreeTerms.Analyze(state, none);
                 var countBefore = Count(new[] { state.Motion });
                 var folded = FoldZeros(fx, root, state);
-                if (folded.Count == 0) continue;
+                if (folded.Count == 0)
+                {
+                    state.Motion = original;
+                    continue;
+                }
                 state.Motion = Prune(state.Motion, empty);
+
+                var mismatch = ActivationMismatch(original, state.Motion);
+                if (mismatch != null)
+                    BridgeError.Report(ErrorSeverity.Error, $"Zero folding self-check failed: '{layer.Name}' {mismatch}.");
 
                 var after = BlendTreeTerms.Analyze(state, none);
                 var writes = BlendshapeWrites(layer);
@@ -339,6 +349,65 @@ namespace Maberikku.FermataNativeFT.Editor
 
         static string Describe(List<Term> terms) =>
             string.Join(" + ", terms.Select(Describe).OrderBy(s => s, StringComparer.Ordinal));
+
+        /// <summary>
+        /// Plays both motions at sampled parameter values and compares which blendshapes an active clip writes: anything
+        /// no active clip writes shows the layers below. 2D blends count every child as active. Null when they agree.
+        /// </summary>
+        static string ActivationMismatch(VirtualMotion a, VirtualMotion b)
+        {
+            var parameters = BlendTreeTerms.Parameters(a).Concat(BlendTreeTerms.Parameters(b))
+                .Where(p => p != OneParameter).Distinct().OrderBy(p => p, StringComparer.Ordinal).ToList();
+            var random = new System.Random(12345);
+            var special = new[] { 0f, 1f, 0.5f, -1f, 0.01f };
+            for (var sample = 0; sample < 512; sample++)
+            {
+                var values = new Dictionary<string, float>(StringComparer.Ordinal) { [OneParameter] = 1f };
+                foreach (var p in parameters)
+                    values[p] = random.Next(3) == 0 ? (float)(random.NextDouble() * 2 - 1) : special[random.Next(special.Length)];
+                var writtenA = new HashSet<(string, string)>();
+                var writtenB = new HashSet<(string, string)>();
+                Written(a, values, writtenA);
+                Written(b, values, writtenB);
+                if (writtenA.SetEquals(writtenB)) continue;
+                var differ = writtenA.Except(writtenB).Concat(writtenB.Except(writtenA)).First();
+                var state = string.Join(", ", values.Where(v => v.Key != OneParameter).Select(v => $"{v.Key}={v.Value.ToString("0.###", CultureInfo.InvariantCulture)}"));
+                return $"{differ.Item1}:{differ.Item2} is active {(writtenA.Contains(differ) ? "only before" : "only after")} folding at {state}";
+            }
+            return null;
+        }
+
+        static void Written(VirtualMotion motion, Dictionary<string, float> values, HashSet<(string, string)> written)
+        {
+            switch (motion)
+            {
+                case VirtualClip clip:
+                    written.UnionWith(BlendshapeBindings(clip));
+                    break;
+                case VirtualBlendTree tree when tree.BlendType == BlendTreeType.Direct:
+                    foreach (var child in tree.Children)
+                        if (values.TryGetValue(child.DirectBlendParameter, out var weight) && weight != 0f)
+                            Written(child.Motion, values, written);
+                    break;
+                case VirtualBlendTree tree when tree.BlendType == BlendTreeType.Simple1D && tree.Children.Count > 0:
+                    values.TryGetValue(tree.BlendParameter, out var x);
+                    var sorted = tree.Children.OrderBy(c => c.Threshold).ToList();
+                    if (x <= sorted[0].Threshold) Written(sorted[0].Motion, values, written);
+                    else if (x >= sorted[sorted.Count - 1].Threshold) Written(sorted[sorted.Count - 1].Motion, values, written);
+                    else
+                        for (var i = 0; i + 1 < sorted.Count; i++)
+                        {
+                            if (x < sorted[i].Threshold || x > sorted[i + 1].Threshold) continue;
+                            if (x < sorted[i + 1].Threshold) Written(sorted[i].Motion, values, written);
+                            if (x > sorted[i].Threshold) Written(sorted[i + 1].Motion, values, written);
+                            break;
+                        }
+                    break;
+                case VirtualBlendTree tree:
+                    foreach (var child in tree.Children) Written(child.Motion, values, written);
+                    break;
+            }
+        }
 
         public static void Run(BuildContext context, VirtualAnimatorController fx, Survey survey, PatchPlan patch, VRCAvatarDescriptor descriptor,
             IReadOnlyList<VirtualAnimatorController> controllers)
@@ -480,7 +549,7 @@ namespace Maberikku.FermataNativeFT.Editor
             }
             else
             {
-                plan.Fx.RemoveLayer(smoothing);
+                plan.Fx.RemoveLayers(l => l == smoothing);
             }
             plan.SmoothingRemoved = true;
         }
@@ -1098,37 +1167,147 @@ namespace Maberikku.FermataNativeFT.Editor
             }
             var fold = new HashSet<(string, string)>(zeroOnly.Where(kv => kv.Value && RestsAtZero(root, kv.Key)).Select(kv => kv.Key));
             if (fold.Count == 0) return fold;
+            var before = Count(new[] { state.Motion }).Curves;
+            state.Motion = Hoist(fx, state.Motion, fold, new HashSet<string>(StringComparer.Ordinal));
+            return Count(new[] { state.Motion }).Curves < before ? fold : new HashSet<(string, string)>();
+        }
 
-            foreach (var slot in slots)
+        /// <summary>
+        /// Moves zero curves up the tree as far as they keep the same activation. Unity skips a clip at weight 0, and a
+        /// blendshape no active clip writes shows the layers below: a zero curve is an override only while its clip is
+        /// active, which is how gestures show through when face tracking is off. A shape can move up to a node when
+        /// that node having any weight already guarantees an active clip writes it.
+        /// </summary>
+        /// <param name="active">Parameters known to be above 0 here, because an ancestor's Direct weight is that parameter.</param>
+        static VirtualMotion Hoist(VirtualAnimatorController fx, VirtualMotion motion, HashSet<(string, string)> fold, HashSet<string> active)
+        {
+            if (!(motion is VirtualBlendTree tree)) return motion;
+            if (tree.BlendType != BlendTreeType.Direct || tree.NormalizedBlendValues)
             {
-                var clip = slot.Clip;
-                var hits = clip.GetFloatCurveBindings().Where(b => b.type == typeof(SkinnedMeshRenderer)
-                    && b.propertyName.StartsWith(BlendTreeTerms.BlendShapePrefix, StringComparison.Ordinal)
-                    && fold.Contains((b.path, b.propertyName.Substring(BlendTreeTerms.BlendShapePrefix.Length)))).ToList();
-                if (hits.Count == 0) continue;
-                var copy = clip.Clone();
-                foreach (var b in hits) copy.SetFloatCurve(b, null);
-                slot.SetClip(copy);
-            }
-
-            var constant = VirtualClip.Create(NamePrefix + "Zero");
-            foreach (var (path, name) in fold.OrderBy(s => s.Item1, StringComparer.Ordinal).ThenBy(s => s.Item2, StringComparer.Ordinal))
-                constant.SetFloatCurve(path, typeof(SkinnedMeshRenderer), BlendTreeTerms.BlendShapePrefix + name, AnimationCurve.Constant(0f, 1f / 60f, 0f));
-            EnsureOne(fx);
-            var always = new VirtualBlendTree.VirtualChildMotion { Motion = constant, DirectBlendParameter = OneParameter };
-            if (state.Motion is VirtualBlendTree top && top.BlendType == BlendTreeType.Direct && !top.NormalizedBlendValues)
-            {
-                top.Children = top.Children.Add(always);
-            }
-            else
-            {
-                var wrapper = VirtualBlendTree.Create(NamePrefix + "Root");
+                var covered = Repeated(tree, Covered(tree, fold, active));
+                var strippedChildren = tree.Children.Select(c => WithMotion(c, Hoist(fx, Without(c.Motion, covered), fold, active))).ToImmutableList();
+                tree.Children = strippedChildren;
+                if (covered.Count == 0 || tree.BlendType == BlendTreeType.Direct) return tree;
+                EnsureOne(fx);
+                var wrapper = VirtualBlendTree.Create(NamePrefix + "Hold");
                 wrapper.BlendType = BlendTreeType.Direct;
                 wrapper.Children = ImmutableList.Create(
-                    new VirtualBlendTree.VirtualChildMotion { Motion = state.Motion, DirectBlendParameter = OneParameter }, always);
-                state.Motion = wrapper;
+                    new VirtualBlendTree.VirtualChildMotion { Motion = tree, DirectBlendParameter = OneParameter },
+                    new VirtualBlendTree.VirtualChildMotion { Motion = ZeroClip(covered), DirectBlendParameter = OneParameter });
+                return wrapper;
             }
-            return fold;
+
+            var children = new List<VirtualBlendTree.VirtualChildMotion>();
+            foreach (var group in tree.Children.GroupBy(c => c.DirectBlendParameter, StringComparer.Ordinal))
+            {
+                var inner = new HashSet<string>(active, StringComparer.Ordinal) { group.Key };
+                var motions = group.Select(c => c.Motion).ToList();
+                var covered = new HashSet<(string, string)>(motions.SelectMany(m => Covered(m, fold, inner)));
+                covered = Repeated(motions, covered);
+                foreach (var child in group)
+                    children.Add(WithMotion(child, Hoist(fx, Without(child.Motion, covered), fold, inner)));
+                if (covered.Count > 0)
+                    children.Add(new VirtualBlendTree.VirtualChildMotion { Motion = ZeroClip(covered), DirectBlendParameter = group.Key });
+            }
+            tree.Children = children.ToImmutableList();
+            return tree;
+        }
+
+        /// <summary>Blendshapes from <paramref name="fold"/> that some active clip is sure to write whenever the motion has any weight.</summary>
+        static HashSet<(string, string)> Covered(VirtualMotion motion, HashSet<(string, string)> fold, HashSet<string> active)
+        {
+            switch (motion)
+            {
+                case VirtualClip clip:
+                    return new HashSet<(string, string)>(BlendshapeBindings(clip).Where(fold.Contains));
+                case VirtualBlendTree tree when tree.BlendType == BlendTreeType.Direct:
+                    if (tree.NormalizedBlendValues) return new HashSet<(string, string)>();
+                    return new HashSet<(string, string)>(tree.Children
+                        .Where(c => c.DirectBlendParameter == OneParameter || active.Contains(c.DirectBlendParameter))
+                        .SelectMany(c => Covered(c.Motion, fold, active)));
+                case VirtualBlendTree tree when tree.Children.Count > 0:
+                    // 1D and 2D weights sum to 1, so one child always plays; it can be any of them.
+                    HashSet<(string, string)> all = null;
+                    foreach (var child in tree.Children)
+                    {
+                        var covered = Covered(child.Motion, fold, active);
+                        if (all == null) all = covered;
+                        else all.IntersectWith(covered);
+                    }
+                    return all;
+                default:
+                    return new HashSet<(string, string)>();
+            }
+        }
+
+        /// <summary>Keeps the blendshapes more than one clip writes: moving one that only a single clip writes saves nothing.</summary>
+        static HashSet<(string, string)> Repeated(VirtualMotion motion, HashSet<(string, string)> shapes) =>
+            Repeated(new[] { motion }, shapes);
+
+        static HashSet<(string, string)> Repeated(IEnumerable<VirtualMotion> motions, HashSet<(string, string)> shapes)
+        {
+            var counts = new Dictionary<(string, string), int>();
+            void Walk(VirtualMotion motion)
+            {
+                if (motion is VirtualClip clip)
+                {
+                    foreach (var shape in BlendshapeBindings(clip))
+                        if (shapes.Contains(shape)) counts[shape] = (counts.TryGetValue(shape, out var n) ? n : 0) + 1;
+                }
+                else if (motion is VirtualBlendTree tree)
+                {
+                    foreach (var child in tree.Children) Walk(child.Motion);
+                }
+            }
+            foreach (var motion in motions) Walk(motion);
+            return new HashSet<(string, string)>(counts.Where(kv => kv.Value > 1).Select(kv => kv.Key));
+        }
+
+        static IEnumerable<(string, string)> BlendshapeBindings(VirtualClip clip) => clip.IsMarkerClip
+            ? Enumerable.Empty<(string, string)>()
+            : clip.GetFloatCurveBindings()
+                .Where(b => b.type == typeof(SkinnedMeshRenderer) && b.propertyName.StartsWith(BlendTreeTerms.BlendShapePrefix, StringComparison.Ordinal))
+                .Select(b => (b.path, b.propertyName.Substring(BlendTreeTerms.BlendShapePrefix.Length)));
+
+        /// <summary>The motion with these blendshapes taken out of every clip. Clips are cloned, since they can be shared.</summary>
+        static VirtualMotion Without(VirtualMotion motion, HashSet<(string, string)> shapes)
+        {
+            if (shapes.Count == 0) return motion;
+            switch (motion)
+            {
+                case VirtualClip clip:
+                    var hits = BlendshapeBindings(clip).Where(shapes.Contains).ToList();
+                    if (hits.Count == 0) return clip;
+                    var copy = clip.Clone();
+                    foreach (var (path, name) in hits)
+                        copy.SetFloatCurve(path, typeof(SkinnedMeshRenderer), BlendTreeTerms.BlendShapePrefix + name, null);
+                    return copy;
+                case VirtualBlendTree tree:
+                    tree.Children = tree.Children.Select(c => WithMotion(c, Without(c.Motion, shapes))).ToImmutableList();
+                    return tree;
+                default:
+                    return motion;
+            }
+        }
+
+        static VirtualBlendTree.VirtualChildMotion WithMotion(VirtualBlendTree.VirtualChildMotion child, VirtualMotion motion) =>
+            new VirtualBlendTree.VirtualChildMotion
+            {
+                Motion = motion,
+                CycleOffset = child.CycleOffset,
+                DirectBlendParameter = child.DirectBlendParameter,
+                Mirror = child.Mirror,
+                Threshold = child.Threshold,
+                Position = child.Position,
+                TimeScale = child.TimeScale,
+            };
+
+        static VirtualClip ZeroClip(HashSet<(string, string)> shapes)
+        {
+            var constant = VirtualClip.Create(NamePrefix + "Zero");
+            foreach (var (path, name) in shapes.OrderBy(s => s.Item1, StringComparer.Ordinal).ThenBy(s => s.Item2, StringComparer.Ordinal))
+                constant.SetFloatCurve(path, typeof(SkinnedMeshRenderer), BlendTreeTerms.BlendShapePrefix + name, AnimationCurve.Constant(0f, 1f / 60f, 0f));
+            return constant;
         }
 
         static bool RestsAtZero(Transform root, (string Path, string Name) shape)

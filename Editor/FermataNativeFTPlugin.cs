@@ -110,7 +110,8 @@ namespace Maberikku.FermataNativeFT.Editor
             var expectedLayers = fx.Layers.Where(l => l != binaryLayer).Select(l => new LayerSnapshot(l)).ToList();
             var parametersBefore = ParameterSnapshot.Take(descriptor.expressionParameters);
 
-            fx.RemoveLayer(binaryLayer);
+            // RemoveLayer does nothing to layers NDMF cloned with the controller, when nothing has merged into it since.
+            fx.RemoveLayers(l => l == binaryLayer);
             DeclareInputs(fx, plan);
             var (bitsBefore, bitsAfter, removed) = UpdateExpressionParameters(context, descriptor, fx, plan);
             AddBehaviors(descriptor, plan);
