@@ -1653,6 +1653,20 @@ namespace Maberikku.FermataNativeFT.Editor
 
             if (descriptor.faceTrackingBlendshapesSetList == null)
                 descriptor.faceTrackingBlendshapesSetList = new List<VRCAvatarDescriptor.FaceTrackingBlendshapesSet>();
+            // In the client, a set fed from a parameter that isn't in Expression Parameters doesn't follow it. Unsynced costs no
+            // bits, and every client computes the gates from what is already synced.
+            var asset = descriptor.expressionParameters;
+            var declared = (asset.parameters ?? Array.Empty<VRCExpressionParameters.Parameter>()).ToList();
+            foreach (var gate in plan.Gates)
+                declared.Add(new VRCExpressionParameters.Parameter
+                {
+                    name = gate.Name,
+                    valueType = VRCExpressionParameters.ValueType.Float,
+                    networkSynced = false,
+                    saved = false,
+                });
+            asset.parameters = declared.ToArray();
+
             var defaults = fx.Parameters;
             foreach (var gate in plan.Gates)
             {
