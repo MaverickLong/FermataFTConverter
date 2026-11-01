@@ -58,14 +58,14 @@ Off by default. With this option on, the bridge moves FermataFT's face onto nati
 - Each movement that native face tracking can reproduce exactly becomes a new blendshape it drives directly, with the same mesh movement.
 - FermataFT's OSCmooth smoothing is removed. Native sync does its own. A part of it stays only where another layer needs it, like the QPro tongue toggle's smoothing on Plum.
 - FermataFT's face blend tree shrinks to what native face tracking can't do, and forwarded inputs nothing reads any more are dropped.
-- Menu toggles, gesture fades, Eye Lid LR Sync, QPro and Type A/B keep working. The animator computes their effect and passes it to native face tracking.
+- Menu toggles, gesture fades, Eye Lid LR Sync, QPro and Type A/B keep working. The animator computes their effect and passes it to native face tracking as it changes.
 
 **What stays in the animator:** ear and other bone movement, the zeros that hide gesture shapes while tracking is on, FermataFT's state layers, the LR-synced eyelid blend (which depends on an angle that expressions can't compute), and anything past VRChat's limits. These limits matter: on the older 3.10.6 betas, with 512 instructions, far less fits. Update your SDK.
 
 **What changes:**
 
 - No OSCmooth smoothing on the face.
-- Toggles reach native shapes a frame or two later.
+- Toggles reach native shapes a frame or two later. A few smoothed transitions, like the Quest Pro tongue toggle's, move in 20 steps instead of smoothly.
 - While tracking is on and no gesture has control, gesture shapes stay hidden. FermataFT let some of them show through at some tracking values.
 
 The NDMF console shows a summary, and the Unity console lists every native shape and what was left behind. With Avatar Optimizer installed, the bridge tells it that native face tracking drives the new shapes, so they are kept.

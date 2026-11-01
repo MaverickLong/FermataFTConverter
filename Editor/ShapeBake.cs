@@ -142,7 +142,6 @@ namespace Maberikku.FermataNativeFT.Editor
         const string ConstPrefix = NamePrefix + "Const/";
         const int MaxSets = 128;
         const int MaxMeshes = 16;
-        const int MaxSetsPerBehaviour = 64;
 
         sealed class Source
         {
@@ -860,6 +859,8 @@ namespace Maberikku.FermataNativeFT.Editor
                 parts = Product(term.Coefficient, tracked, inputs, out magnitude);
             }
             if (parts == null || parts.Count == 0 || parts.Any(p => !p.Item1.IsValid)) return null;
+            // In the client, a behavior with no tracking input isn't scaled by its set, so a constant driver can't be gated.
+            if (parts.Any(p => p.Item1.InputKey == null && !NativeExpression.Check(p.Item1.Expression).Inputs.Any())) return null;
 
             return new Candidate
             {
@@ -1203,6 +1204,7 @@ namespace Maberikku.FermataNativeFT.Editor
         static HashSet<string> BinaryParameters(VRCAvatarDescriptor descriptor, IReadOnlyList<VirtualAnimatorController> controllers)
         {
             var values = new Dictionary<string, HashSet<float>>(StringComparer.Ordinal);
+            var written = new HashSet<string>(StringComparer.Ordinal);
             var other = new HashSet<string>(StringComparer.Ordinal)
             {
                 "GestureLeft", "GestureRight", "GestureLeftWeight", "GestureRightWeight", "Viseme", "Voice", "VelocityX",
@@ -1241,6 +1243,7 @@ namespace Maberikku.FermataNativeFT.Editor
                             if (p == null) continue;
                             if (p.type == VRC_AvatarParameterDriver.ChangeType.Set) Value(p.name, p.value);
                             else other.Add(p.name);
+                            written.Add(p.name);
                         }
                     }
                 }
@@ -1259,6 +1262,7 @@ namespace Maberikku.FermataNativeFT.Editor
                 {
                     if (control == null) continue;
                     Value(control.parameter?.name, control.value);
+                    if (!string.IsNullOrEmpty(control.parameter?.name)) written.Add(control.parameter.name);
                     foreach (var sub in control.subParameters ?? Array.Empty<VRCExpressionsMenu.Control.Parameter>())
                         if (!string.IsNullOrEmpty(sub?.name)) other.Add(sub.name);
                     if (control.subMenu) pending.Push(control.subMenu);
@@ -1273,6 +1277,10 @@ namespace Maberikku.FermataNativeFT.Editor
                 if (field != null && field.FieldType == typeof(string) && field.GetValue(component) is string prefix && prefix.Length > 0)
                     prefixes.Add(prefix);
             }
+
+            // A declared float that nothing visible writes is taken to be driven from outside: OSC, or a menu this pass can't see.
+            foreach (var p in descriptor.expressionParameters?.parameters ?? Array.Empty<VRCExpressionParameters.Parameter>())
+                if (p != null && p.valueType == VRCExpressionParameters.ValueType.Float && !written.Contains(p.name)) other.Add(p.name);
 
             return new HashSet<string>(values.Where(kv => kv.Value.All(v => v == 0f || v == 1f) && !other.Contains(kv.Key)
                                                           && !prefixes.Any(p => kv.Key.StartsWith(p, StringComparison.Ordinal)))
@@ -1592,10 +1600,18 @@ namespace Maberikku.FermataNativeFT.Editor
             return added;
         }
 
+        /// <summary>How finely a gate that can't be exact is stepped: levels 0, 1/GateSteps, ..., 1.</summary>
+        const int GateSteps = 20;
+
         /// <summary>
-        /// One layer multiplies each gate's factors into a parameter, mirroring the original blend trees; another
-        /// re-enters a state every frame so a Blendshapes Set behaviour copies those parameters into the set weights
-        /// (it only reads them on state entry).
+        /// Gates reach native face tracking through state entry alone. In the client, a Blendshapes Set fed from a
+        /// parameter follows it only when the parameter is in Expression Parameters, and never one a blend tree
+        /// writes, declared or not, copied by a driver or not. So one layer multiplies each gate's factors into a
+        /// parameter, as the original trees did, and a small state machine per gate steps that parameter: entering a
+        /// level's state applies the level as the set's weight, by value. A factor a declared parameter drives along
+        /// a straight line over 0..1, like Type A/B, stays exact: its level's two states re-enter each other every
+        /// frame and read the parameter with a range conversion. A gate whose other factors are all binary has
+        /// exactly its reachable values as levels, so FermataFT's toggles and gesture fades are exact too.
         /// </summary>
         static void AddGateLayers(VirtualAnimatorController fx, VRCAvatarDescriptor descriptor, Plan plan)
         {
@@ -1607,80 +1623,168 @@ namespace Maberikku.FermataNativeFT.Editor
             {
                 string name;
                 do name = GatePrefix + (index++).ToString(CultureInfo.InvariantCulture);
-                while (parameters.ContainsKey(name) || existingSets.Contains(name));
+                while (parameters.ContainsKey(name) || existingSets.Contains(name) || fx.Layers.Any(l => l.Name == name));
                 gate.Name = name;
-                fx.SetParameter(name, new AnimatorControllerParameter { name = name, type = AnimatorControllerParameterType.Float });
             }
             fx.SetParameter(OneParameter, new AnimatorControllerParameter { name = OneParameter, type = AnimatorControllerParameterType.Float, defaultFloat = 1f });
-
-            var empty = VirtualClip.Create(NamePrefix + "Empty");
-            var gateTree = VirtualBlendTree.Create(NamePrefix + "Gates");
-            gateTree.BlendType = BlendTreeType.Direct;
-            gateTree.Children = plan.Gates.Select(g => new VirtualBlendTree.VirtualChildMotion
-            {
-                Motion = Chain(fx, g.Factors, 0, g.Name, empty),
-                DirectBlendParameter = OneParameter,
-            }).ToImmutableList();
-            var gateLayer = fx.AddLayer(new LayerPriority(int.MaxValue), NamePrefix + "Gates");
-            gateLayer.DefaultWeight = 1f;
-            var gateState = gateLayer.StateMachine.AddState("Gates", gateTree);
-            gateState.WriteDefaultValues = true;
-            gateLayer.StateMachine.DefaultState = gateState;
-
-            var weightLayer = fx.AddLayer(new LayerPriority(int.MaxValue), NamePrefix + "Gate Weights");
-            weightLayer.DefaultWeight = 1f;
-            var a = weightLayer.StateMachine.AddState("Apply A");
-            var b = weightLayer.StateMachine.AddState("Apply B");
-            foreach (var (from, to) in new[] { (a, b), (b, a) })
-            {
-                from.WriteDefaultValues = true;
-                from.Behaviours = plan.Gates.Select((g, i) => (g, i)).GroupBy(x => x.i / MaxSetsPerBehaviour)
-                    .Select(group => (StateMachineBehaviour)SetWeights(group.Select(x => x.g))).ToImmutableList();
-                var transition = VirtualStateTransition.Create();
-                transition.SetDestination(to);
-                transition.Conditions = ImmutableList.Create(new AnimatorCondition
-                {
-                    mode = AnimatorConditionMode.Greater,
-                    parameter = OneParameter,
-                    threshold = 0.5f,
-                });
-                transition.ExitTime = null;
-                transition.Duration = 0f;
-                transition.HasFixedDuration = true;
-                from.Transitions = ImmutableList.Create(transition);
-            }
-            weightLayer.StateMachine.DefaultState = a;
-
             if (descriptor.faceTrackingBlendshapesSetList == null)
                 descriptor.faceTrackingBlendshapesSetList = new List<VRCAvatarDescriptor.FaceTrackingBlendshapesSet>();
-            // In the client, a set fed from a parameter that isn't in Expression Parameters doesn't follow it. Unsynced costs no
-            // bits, and every client computes the gates from what is already synced.
-            var asset = descriptor.expressionParameters;
-            var declared = (asset.parameters ?? Array.Empty<VRCExpressionParameters.Parameter>()).ToList();
-            foreach (var gate in plan.Gates)
-                declared.Add(new VRCExpressionParameters.Parameter
-                {
-                    name = gate.Name,
-                    valueType = VRCExpressionParameters.ValueType.Float,
-                    networkSynced = false,
-                    saved = false,
-                });
-            asset.parameters = declared.ToArray();
 
+            var declared = new HashSet<string>((descriptor.expressionParameters?.parameters ?? Array.Empty<VRCExpressionParameters.Parameter>())
+                .Where(p => p != null).Select(p => p.name), StringComparer.Ordinal);
             var defaults = fx.Parameters;
+            float Default(Factor f) => f.Evaluate(defaults.TryGetValue(f.Parameter, out var p) ? p.defaultFloat : 0f);
+
+            var empty = VirtualClip.Create(NamePrefix + "Empty");
+            var anchor = VirtualClip.Create(NamePrefix + "Gates Zero");
+            var products = new List<VirtualBlendTree.VirtualChildMotion>();
             foreach (var gate in plan.Gates)
             {
-                var weight = gate.Factors.Aggregate(1f, (w, f) => w * f.Evaluate(defaults.TryGetValue(f.Parameter, out var p) ? p.defaultFloat : 0f));
+                // One continuous factor at most is read every frame; binary ones are exact through stepping, for nothing.
+                var exact = gate.Factors.FirstOrDefault(f => IsExact(f, declared) && !plan.Binary.Contains(f.Parameter));
+                var rest = gate.Factors.Where(f => f != exact).ToList();
+                var levels = Levels(rest, plan.Binary);
+                if (rest.Count > 0)
+                {
+                    fx.SetParameter(gate.Name, new AnimatorControllerParameter { name = gate.Name, type = AnimatorControllerParameterType.Float });
+                    products.Add(new VirtualBlendTree.VirtualChildMotion { Motion = Chain(fx, rest, 0, gate.Name, empty), DirectBlendParameter = OneParameter });
+                    anchor.SetFloatCurve("", typeof(Animator), gate.Name, AnimationCurve.Constant(0f, 1f / 60f, 0f));
+                }
+                var restDefault = rest.Aggregate(1f, (w, f) => w * Default(f));
+                AddGateLayer(fx, gate, exact, levels, restDefault);
                 descriptor.faceTrackingBlendshapesSetList.Add(new VRCAvatarDescriptor.FaceTrackingBlendshapesSet
                 {
                     setName = gate.Name,
-                    setWeight = Mathf.Clamp01(weight),
+                    setWeight = Mathf.Clamp01(restDefault * (exact != null ? Default(exact) : 1f)),
                     faceTrackingBlendshapeNames = Enumerable.Repeat("", (int)VRCAvatarDescriptor.FaceTrackingKey.Max).ToArray(),
                     faceTrackingBlendshapeMultipliers = Enumerable.Repeat(1f, (int)VRCAvatarDescriptor.FaceTrackingKey.Max).ToArray(),
                     visemeBlendshapeNames = Enumerable.Repeat("", (int)VRC_AvatarDescriptor.Viseme.Count).ToArray(),
                     visemeBlendshapeMultipliers = Enumerable.Repeat(1f, (int)VRC_AvatarDescriptor.Viseme.Count).ToArray(),
                 });
             }
+            if (products.Count == 0) return;
+
+            // Unity skips a child at weight 0, which would leave a parameter at its last value. The anchor always plays,
+            // so every gate parameter is written each frame: 0 plus the product.
+            products.Add(new VirtualBlendTree.VirtualChildMotion { Motion = anchor, DirectBlendParameter = OneParameter });
+            var gateTree = VirtualBlendTree.Create(NamePrefix + "Gates");
+            gateTree.BlendType = BlendTreeType.Direct;
+            gateTree.Children = products.ToImmutableList();
+            var gateLayer = fx.AddLayer(new LayerPriority(int.MaxValue), NamePrefix + "Gates");
+            gateLayer.DefaultWeight = 1f;
+            var gateState = gateLayer.StateMachine.AddState("Gates", gateTree);
+            gateState.WriteDefaultValues = true;
+            gateLayer.StateMachine.DefaultState = gateState;
+        }
+
+        /// <summary>A factor a Blendshapes Set can read on its own: a declared parameter, taken along a line over 0..1.</summary>
+        static bool IsExact(Factor f, HashSet<string> declared) =>
+            f.ParameterY == null && declared.Contains(f.Parameter)
+            && (f.Linear || (f.Knots.Length == 2 && f.Knots[0] == 0f && f.Knots[1] == 1f));
+
+        /// <summary>The values the product of these factors can take when they are all binary; otherwise even steps.</summary>
+        static List<float> Levels(List<Factor> rest, HashSet<string> binary)
+        {
+            if (rest.Count == 0) return new List<float> { 1f };
+            var names = rest.Select(f => f.Parameter).Distinct().ToList();
+            if (names.All(binary.Contains) && names.Count <= 8)
+            {
+                var values = new SortedSet<float>();
+                for (var mask = 0; mask < 1 << names.Count; mask++)
+                {
+                    var product = 1f;
+                    foreach (var f in rest) product *= f.Evaluate((mask >> names.IndexOf(f.Parameter)) & 1);
+                    values.Add(Mathf.Clamp01((float)Math.Round(product, 5)));
+                }
+                return values.ToList();
+            }
+            return Enumerable.Range(0, GateSteps + 1).Select(i => i / (float)GateSteps).ToList();
+        }
+
+        /// <summary>
+        /// The state machine that applies one gate's weight. State names carry what each state applies, "V|level"
+        /// or "P|level|parameter|from|to|A", so a test can read the weight off the current state. Unity turns the
+        /// periods in those numbers into underscores.
+        /// </summary>
+        static void AddGateLayer(VirtualAnimatorController fx, BakeGate gate, Factor exact, List<float> levels, float restDefault)
+        {
+            var layer = fx.AddLayer(new LayerPriority(int.MaxValue), gate.Name);
+            layer.DefaultWeight = 1f;
+            var machine = layer.StateMachine;
+            var anyState = new List<VirtualStateTransition>();
+            var nearest = levels.OrderBy(l => Math.Abs(l - restDefault)).First();
+            VirtualState defaultState = null;
+            for (var i = 0; i < levels.Count; i++)
+            {
+                var level = levels[i];
+                var reads = exact != null && level > 0f;
+                float from = exact == null ? 0f : exact.Linear ? 0f : exact.Values[0] * level;
+                float to = exact == null ? 0f : exact.Linear ? level : exact.Values[1] * level;
+                var prefix = reads ? $"P|{Num(level)}|{exact.Parameter}|{Num(from)}|{Num(to)}|" : $"V|{Num(level)}";
+
+                var a = machine.AddState(reads ? prefix + "A" : prefix);
+                a.WriteDefaultValues = true;
+                a.Behaviours = ImmutableList.Create<StateMachineBehaviour>(SetWeight(gate.Name, reads ? exact.Parameter : null, level, from, to));
+                if (reads)
+                {
+                    // The behaviour reads only on state entry, so two states re-enter each other every frame.
+                    var b = machine.AddState(prefix + "B");
+                    b.WriteDefaultValues = true;
+                    b.Behaviours = ImmutableList.Create<StateMachineBehaviour>(SetWeight(gate.Name, exact.Parameter, level, from, to));
+                    a.Transitions = ImmutableList.Create(Always(b));
+                    b.Transitions = ImmutableList.Create(Always(a));
+                }
+                if (levels.Count > 1)
+                {
+                    var conditions = new List<AnimatorCondition>();
+                    if (i > 0)
+                        conditions.Add(new AnimatorCondition { mode = AnimatorConditionMode.Greater, parameter = gate.Name, threshold = (levels[i - 1] + level) / 2f });
+                    if (i + 1 < levels.Count)
+                        conditions.Add(new AnimatorCondition { mode = AnimatorConditionMode.Less, parameter = gate.Name, threshold = (level + levels[i + 1]) / 2f });
+                    var transition = Always(a);
+                    transition.Conditions = conditions.ToImmutableList();
+                    transition.CanTransitionToSelf = false;
+                    anyState.Add(transition);
+                }
+                if (defaultState == null && level == nearest) defaultState = a;
+            }
+            machine.AnyStateTransitions = anyState.ToImmutableList();
+            machine.DefaultState = defaultState;
+        }
+
+        static VirtualStateTransition Always(VirtualState to)
+        {
+            var transition = VirtualStateTransition.Create();
+            transition.SetDestination(to);
+            transition.Conditions = ImmutableList.Create(new AnimatorCondition { mode = AnimatorConditionMode.Greater, parameter = OneParameter, threshold = 0.5f });
+            transition.ExitTime = null;
+            transition.Duration = 0f;
+            transition.HasFixedDuration = true;
+            return transition;
+        }
+
+        /// <summary>Applies one set's weight on state entry: a fixed level, or a declared parameter mapped from 0..1 onto from..to.</summary>
+        static VRCAnimatorFaceTrackingBlendshapesSet SetWeight(string set, string parameter, float level, float from, float to)
+        {
+            var behaviour = ScriptableObject.CreateInstance<VRCAnimatorFaceTrackingBlendshapesSet>();
+            behaviour.name = set;
+            behaviour.blendSets = new List<VRC_AnimatorFaceTrackingBlendshapesSet.BlendSet>
+            {
+                new VRC_AnimatorFaceTrackingBlendshapesSet.BlendSet
+                {
+                    type = parameter == null ? VRC_AnimatorFaceTrackingBlendshapesSet.SourceType.Value : VRC_AnimatorFaceTrackingBlendshapesSet.SourceType.Parameter,
+                    sourceParameter = parameter ?? "",
+                    blendshapesSetName = set,
+                    weight = level,
+                    convertRange = parameter != null,
+                    sourceMin = 0f,
+                    sourceMax = 1f,
+                    destMin = from,
+                    destMax = to,
+                    lerpSpeed = 0f,
+                },
+            };
+            return behaviour;
         }
 
         /// <summary>A blend tree whose output parameter is the product of the factors from <paramref name="index"/> on.</summary>
@@ -1725,25 +1829,7 @@ namespace Maberikku.FermataNativeFT.Editor
             return tree;
         }
 
-        static VRCAnimatorFaceTrackingBlendshapesSet SetWeights(IEnumerable<BakeGate> gates)
-        {
-            var behaviour = ScriptableObject.CreateInstance<VRCAnimatorFaceTrackingBlendshapesSet>();
-            behaviour.name = NamePrefix + "Gate Weights";
-            behaviour.blendSets = gates.Select(g => new VRC_AnimatorFaceTrackingBlendshapesSet.BlendSet
-            {
-                type = VRC_AnimatorFaceTrackingBlendshapesSet.SourceType.Parameter,
-                sourceParameter = g.Name,
-                blendshapesSetName = g.Name,
-                weight = 1f,
-                convertRange = false,
-                sourceMin = 0f,
-                sourceMax = 1f,
-                destMin = 0f,
-                destMax = 1f,
-                lerpSpeed = 0f,
-            }).ToList();
-            return behaviour;
-        }
+        static string Num(float v) => v.ToString("0.#####", CultureInfo.InvariantCulture);
 
         /// <summary>
         /// Analyses the edited layers again: every blendshape must keep exactly its terms that weren't baked, so the
