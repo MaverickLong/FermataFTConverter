@@ -35,7 +35,7 @@ namespace Maberikku.FermataNativeFT.Editor
                 seq.Run("Forward native face tracking into FermataFT", BridgePass.Execute);
             });
 
-            // The list of baked blendshapes only exists for Avatar Optimizer (see FermataNativeFTBakedShapes).
+            // The list of native blendshapes only exists for Avatar Optimizer (see FermataNativeFTBakedShapes).
             InPhase(BuildPhase.Optimizing)
                 .AfterPlugin("com.anatawa12.avatar-optimizer")
                 .Run("Remove the baked blendshape list", context =>
@@ -129,10 +129,10 @@ namespace Maberikku.FermataNativeFT.Editor
 
             var allControllers = controllers.Values.Where(c => c != null).Distinct().ToList();
             var survey = ShapeBake.Look(fx, allControllers, plan);
-            ShapeBake.Fold(context.AvatarRootTransform, fx, survey);
-            // The shape bake is kept but not wired up for now: OSCmooth and FermataFT's blend trees stay as they are.
-            // if (markers.Any(m => m.bakeExactShapes))
-            //     ShapeBake.Run(context, fx, survey, plan, descriptor, allControllers);
+            if (markers.Any(m => m.migrateToNative))
+                ShapeBake.Run(context, fx, survey, plan, descriptor, allControllers);
+            else
+                ShapeBake.Fold(context.AvatarRootTransform, fx, survey);
 
             // The SDK only validates the scene avatar, never the behaviors added here, so surface its warnings now.
             foreach (var warning in FaceTrackingExpressionValidator.CollectWarnings(descriptor))

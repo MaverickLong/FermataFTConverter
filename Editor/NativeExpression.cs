@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Reflection;
 using VRC.SDK3.Avatars.Components;
 
 namespace Maberikku.FermataNativeFT.Editor
@@ -27,17 +28,27 @@ namespace Maberikku.FermataNativeFT.Editor
     internal static class NativeExpression
     {
         /// <summary>Per-avatar budget for all custom expressions; the client skips custom behaviors past it.</summary>
-        public const int MaxInstructions = 512;
+        public static readonly int MaxInstructions = SdkLimit("MaxTotalInstructionsPerAvatar", 512);
 
         /// <summary>Per-avatar limit on parameter behaviors.</summary>
         public const int MaxBehaviors = 128;
 
-        public const int MaxLength = 512;
-        public const int MaxExpressionInstructions = 64;
-        const int MaxTokens = 128;
-        const int MaxNesting = 16;
-        const int MaxStackDepth = 16;
+        public static readonly int MaxLength = SdkLimit("MaxExpressionLength", 512);
+        public static readonly int MaxExpressionInstructions = SdkLimit("MaxInstructionCount", 64);
+        static readonly int MaxTokens = SdkLimit("MaxTokenCount", 128);
+        static readonly int MaxNesting = SdkLimit("MaxNestingDepth", 16);
+        static readonly int MaxStackDepth = SdkLimit("MaxStackDepth", 16);
         const int MaxNumberLength = 20;
+
+        /// <summary>
+        /// The installed SDK's limit, read from its validator: Avatars 3.10.6 raised them, and the same build of this tool
+        /// runs on either. The fallbacks are the older, smaller limits.
+        /// </summary>
+        static int SdkLimit(string field, int fallback)
+        {
+            var info = typeof(FaceTrackingExpressionValidator).GetField(field, BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
+            return info != null && info.IsLiteral && info.GetRawConstantValue() is int value ? value : fallback;
+        }
         const float MaxNumberMagnitude = 10000f;
 
         public const string Voice = "Voice";

@@ -4,7 +4,7 @@ Facts this tool relies on, where they were verified, and what is still open. Che
 
 ## Design
 
-- Scope: a stopgap. FermataFT's face blend tree stays in the animator; compiling all of it to native face tracking was prototyped and abandoned (it does not fit the 512-instruction budget). The shape bake (below) is kept in the code but not wired up.
+- Scope: a stopgap. FermataFT's face blend tree stays in the animator; compiling all of it to native face tracking was prototyped and abandoned (it does not fit the 512-instruction budget). Migrating (below) is opt-in, and always keeps forwarding as the base for what can't move.
 - One NDMF pass, triggered by the `FermataNativeFTBridge` marker, patches the build copy after Modular Avatar has merged FermataFT:
   1. Remove the `_OSCmooth_Binary_Gen` FX layer (decodes the bit-packed sync).
   2. Keep `_OSCmooth_Smoothing_Gen` untouched. Its `v2/*` inputs are now written by native *Forward to Animator* behaviors, on every client.
@@ -14,7 +14,7 @@ Facts this tool relies on, where they were verified, and what is still open. Che
   6. Fold zero overrides in FermataFT's face layers and prune what's left empty (below), with its own self-check.
 - Zero folding (every build): a blendshape that a single-state Write Defaults blend-tree layer only ever sets to 0, and that rests at 0 on its renderer, always has the value 0 while the layer writes it.
   - Only when every state in FX has Write Defaults on. Unity blends unreliably in controllers that mix WD on and off. Otherwise nothing is folded, and the Unity console says why. Chocolat's and Plum's FX controllers and FermataFT's layers are WD on throughout (Plum's FermataFT controllers also contain a few WD-off states that no layer reaches).
-  - Whether the layer writes it is the part that matters, measured in Unity 2022.3: a clip at weight 0 isn't evaluated, and a blendshape no active clip writes shows the layers below, while any active clip overrides them completely. A Direct child writing 30 over a lower layer's 100 gives 100 at weight 0, 7.5 at 0.25 and 30 at 1. So these zero curves are the switch that hides the hand layers' gestures (FermataFT merges those at priority -99999, below its face layer) while tracking is on.
+  - Whether the layer writes it is the part that matters, measured in Unity 2022.3: a clip at weight 0 isn't evaluated, and a blendshape no active clip writes shows the layers below, while any active clip overrides them completely. A Direct child writing 30 over a lower layer's 100 gives 100 at weight 0, 7.5 at 0.25 and 30 at 1. So these zero curves are the switch that hides the hand layers' gestures (FermataFT merges those below its face layer) while tracking is on.
   - A curve therefore only moves up the tree as far as its activation stays the same: to a node where having any weight already guarantees an active clip writes that shape. 1D and 2D blends cover a shape when every child does, because one child always plays. A Direct child covers it under its own parameter, and under an always-on or already-implied parameter also for its parent. Curves moved to one place become one clip, weighted by the same parameter (or by `FNFT/One`, a float added with default 1 that nothing writes, inside a new Direct wrapper).
   - Subtrees left animating nothing are pruned. A dead Direct child goes; a dead 1D or 2D child becomes an empty clip, because its threshold still shapes its siblings' weights.
   - Self-checks: the layer is analysed again, and every other blendshape must keep exactly its terms. Both trees are also played at 512 sampled parameter values, and the same blendshapes must be written at each (2D blends count every child as active).
@@ -24,54 +24,66 @@ Facts this tool relies on, where they were verified, and what is still open. Che
 - `PatchPlanner` holds every check and is shared by the inspector (on the original controllers) and the build (on NDMF virtual controllers).
 - FermataFT is detected by its `ftSet` component (matched by type name) or by the OSCmooth layers in FX, which covers older installs that edited the avatar FX directly.
 - Custom expressions (`FermataNativeFTBridge.customForwards`) replace a built-in formula by parameter name, add extra forwards, or fill in `v2/*` inputs without a built-in formula. The UI follows Pawlygon's Face Tracking Parameters design (override button, `+` input picker, `ƒ` function menu, inserting at the cursor). Pawlygon's VRC-Facetracking is MIT; see `THIRD_PARTY_NOTICES.md`.
-- `NativeExpression.Check` parses expressions with the SDK's documented rules: syntax, known inputs, function arities, 512 characters, 128 tokens, 64 instructions, nesting and stack depth 16, numbers up to ±10000. The inspector and the build share it; an invalid custom expression is a build error.
+- `NativeExpression.Check` parses expressions with the SDK's documented rules: syntax, known inputs, function arities, the installed SDK's limits on characters, tokens, instructions and depth, numbers up to ±10000. The inspector and the build share it; an invalid custom expression is a build error.
 
-## Shape bake (not wired up)
+## Migrating to native face tracking
 
-Kept in the code (`ShapeBake.Run`) but not wired up: the build doesn't call it, and the inspector doesn't show `bakeExactShapes`. For now the bridge keeps OSCmooth and FermataFT's blend trees, and only zero folding changes the face layer. The rest of this section describes the bake as written.
+`migrateToNative` on the marker, off by default. It replaces zero folding and runs after forwarding. Anything it can't move keeps running in the animator on forwarded inputs, so a partial result is still exact.
 
-It runs after forwarding, which always stays: whatever isn't baked keeps running in the animator on the forwarded inputs, and turning the option off gives plain forwarding again.
-
-- Analysis (`BlendTreeTerms`): a single-state, Write Defaults, override layer at weight 1 with no mask, no transitions and no layer control is rewritten per blendshape as a sum of terms, coefficient × product of single-parameter factors.
+- Analysis (`BlendTreeTerms`): a single-state, Write Defaults, override layer at weight 1 with no mask, no transitions and no layer control is rewritten per blendshape as a sum of terms, coefficient × product of factors.
   - A Direct child multiplies by its parameter.
-  - A 1D tree interpolates its children's coefficients over the thresholds. When every child gives the same result, the parameter drops out; FermataFT repeats subtrees under JawOpen and SmileSad like this.
-  - 2D blends, clips that change over time and normalised Direct trees are opaque and stay in the animator.
-- A term is baked when its factors on forwarded inputs (or on their OSCmooth copies, `OSCm/Proxy/<input>`, when only the smoothing layer writes them) are piecewise linear, and every other factor is on an ordinary animator parameter with non-negative values.
-  - One input, zero at the input's rest value: one *Apply to Blendshape* behavior per linear segment, driven by `(E - a)/(b - a)` or `(b - E)/(b - a)` and relying on the 0..1 output clamp. Blendshapes that share a segment and gate share one behavior and one baked shape.
-  - Otherwise: the whole product as one custom expression with explicit clamps, split by sign.
-- Gates: a term's other factors (`EyeTrackingActive`, gesture fades, `Eye Lid LR Sync`, QPro, ...) are rebuilt as a blend tree that writes their product to `FNFT/Gate/<n>`. A second layer re-enters a state every frame, so a *VRC Animator Face Tracking Blendshapes Set* behaviour copies that parameter into the set `FNFT/Gate/<n>`, which the term's behaviors name as `weightBlendSetName`.
-  - The gate scales the behavior's output, so partial gate values (FermataFT's gestures partly fade its face tracking) stay exact. A curve stored in in-between frames would be applied after the gate and come out wrong, which is why every baked shape is linear.
-- Each baked blendshape must have one frame and weight 0 on its renderer. No other layer may animate it, and the descriptor must not own it (visemes, eyelids, existing face tracking).
-- Binary parameters: a parameter is binary when every value the avatar can give it is 0 or 1 (controller defaults, parameter driver Sets, menu toggles and buttons) and nothing else writes it (clips, other driver kinds, puppet sub-parameters, contacts, PhysBones, VRChat's continuous built-ins). OSC from outside the avatar is assumed not to.
-  - For a binary parameter only the values at 0 and 1 matter. Every factor on it becomes that two-point function, and repeated factors on it multiply into one. FermataFT repeats `LipTrackingActive` and friends at several depths, so branches that differed only in how often a toggle appeared now compare equal and merge.
-  - On Chocolat this cut the cost of baking every exact term from about 1,790 to 1,340 instructions.
-  - Radial puppets stay continuous. Plum's Type A/B (`TypeSelect`, a radial) is a continuous gate: shapes where the two types differ carry both branches at once, each scaled by its own set.
-- Forward trimming: after a round, a FermataFT input whose value, and whose OSCmooth copy, no layer outside the smoothing layer still reads loses its forward behavior. "Reads" counts transition conditions, state behaviours and state parameters, and blend tree parameters only where the subtree still animates something. Extra custom forwards are never dropped. The freed behaviors and instructions go to the next round, up to 8 rounds.
-- Goal: less animator work per frame.
-- OSCmooth off: once any term is native, the animator part must see the same values at the same time, so forwards write the copies the blend trees read (`OSCm/Proxy/<input>`) and the smoothing layer is removed (or emptied, if a layer control or FermataFT's named control refers to it).
-  - The bake is skipped before it changes anything if something else reads a parameter that only the smoothing layer writes and that no forward could write.
-  - With nothing native, OSCmooth stays.
-- Pruning: after baking, subtrees that animate nothing are removed, as for zero folding.
-- Budget: terms are ranked by the curves they take out of the tree per instruction. When a term is the last reader of a forwarded input (nothing that isn't a candidate reads it), the forward's instructions count back. Ties go to mesh displacement. Terms are taken until the next would pass 128 behaviors, 512 instructions, 128 sets or 16 face tracking meshes.
-- Projection for Chocolat (Python model of the tree): with the single- and two-input terms approximated by per-key shapes, and the 3+-input terms ranked as above, FacialTracking drops to about 295 curves (zero folding included) at 477 of 512 instructions, with OSCmooth's 240 curves gone. The approximation layer isn't built yet; the build reports the real numbers.
-- Editing: the layer's blend trees are copied so no clip slot is shared, and clips are cloned per slot before their bindings are removed. A self-check analyses the layer again: every blendshape must keep exactly its unbaked terms, and no dropped forward may still be read.
-- Avatar Optimizer ignores the descriptor's face tracking mappings and would freeze the baked shapes. `FermataNativeFTBakedShapes` plus a `ComponentInformation` declares them modified and follows renames and mesh merges into the descriptor. That assembly only compiles with AAO 1.7 or later, and the component is removed after AAO.
-- Known differences from plain forwarding: no smoothing anywhere on the face, and a gate change reaches the set weight a frame or two later.
+  - A 1D tree interpolates its children's coefficients over the thresholds. When every child gives the same result, the parameter drops out; FermataFT repeats subtrees like this.
+  - 2D blends, measured against Unity 2022.3 on a grid over -1..1 (error under 0.00001):
+    - Freeform Cartesian with all points on x = y is exactly a 1D blend on (x + y) / 2.
+    - Simple Directional with a center and a convex ring: in the wedge between neighbours A and B the point is u·A + v·B. A ring child weighs u or v, the center 1 - u - v, and past the ring u and v are divided by u + v. That's `max(0, min(u_next, v_prev)) / max(1, gauge)` per child. Values on one plane cut off at 0 reduce to `max(0, a·x + b·y) / max(1, gauge)`.
+    - Freeform Directional also depends on the angle off the points' line, even with all points on x = y. Expressions have no sqrt or atan, so it stays in the animator. Treating it as 1D on the average is off by up to 0.018 in weight for |L-R| ≤ 0.1, and 0.6 at worst.
+  - Clips that change over time and normalised Direct trees also stay in the animator.
+- `ExpressionCompiler`: an input is parsed to a constant plus scaled atoms (tracking keys, and `max` of keys) with the range it can take.
+  - Spends nothing on clamps its range can't reach, spells one segment over the whole range as a plain linear function, and factors a common coefficient: `1.111111 - 0.555556 * (a + b)`.
+  - A forward clamps to -1..1, so an input that can leave that range stays one clamped atom. Combining two inputs (a 2D blend's arithmetic) must not clamp.
+- Encoding: one input, zero at rest: one *Apply to Blendshape* behavior per linear segment, relying on the 0..1 output clamp. Otherwise the whole product as one custom expression, split by sign. Blendshapes that share a driver and gate share one behavior and one native shape.
+  - In-between frames could hold a whole curve on one behavior, but save under 5% of instructions, and whether a set scales the curve's input or output isn't settled, so every native shape stays linear.
+- Gates: a term's other factors are rebuilt as a blend tree that writes their product to `FNFT/Gate/<n>`. A second layer re-enters a state every frame, so a *VRC Animator Face Tracking Blendshapes Set* behaviour copies that parameter into the set `FNFT/Gate/<n>`, which the term's behaviors name as `weightBlendSetName`.
+- Binary parameters: a parameter is binary when every value the avatar can give it is 0 or 1 (controller defaults, parameter driver Sets, menu toggles and buttons) and nothing else writes it. Every factor on it becomes a two-point function and repeated ones multiply into one, so branches that differed only in how often a toggle appeared merge. Radial puppets stay continuous: Plum's Type A/B is a gate, and shapes where the types differ carry both branches.
+- Which shapes can move: one frame, weight 0 on its renderer, not owned by the descriptor (visemes, eyelids, existing face tracking), and no later FX layer animates it. Earlier layers are fine: see holds.
+- Holds, what freezes gestures: a slot whose term moved keeps writing 0, since an active clip writing a shape is what hides the layers below (see zero folding).
+  - A shape nothing below animates loses those zeros: writing 0 and writing nothing then look the same.
+  - The rest are taken out from under forwarded inputs, then folded. They follow the gates (tracking on, no gesture in control) and not the tracking values. This is the one deliberate change: FermataFT holds some shapes only over part of an input's range, and keeping that would keep most of the tree and its forwards.
+- Forward trimming: a FermataFT input that no layer outside the smoothing layer still reads loses its forward. "Reads" counts transition conditions, state behaviours and state parameters, and blend tree parameters only where the subtree still animates something. Extra custom forwards are never dropped. Freed budget goes to the next round, up to 8 rounds.
+- OSCmooth: once any term is native, forwards write the copies the blend trees read (`OSCm/Proxy/<input>`), and the smoothing layer goes. What other layers read from it and no forward could write keeps its branch: its root is a Direct tree with one child per input. If that can't be separated, the migration is skipped.
+- Budget: terms are ranked by the curves they take out of the tree per instruction, and when a term is the last reader of an input, the forward's instructions count back. Terms are taken until the next would pass the SDK's limits.
+- Self-checks: the layer is analysed again and must keep exactly its unmoved terms. Both trees are played at sampled parameter values, and the new one must write at least what the old one wrote among shapes the layers below animate. No dropped forward may still be read.
+- Avatar Optimizer ignores the descriptor's face tracking mappings and would freeze the native shapes. `FermataNativeFTBakedShapes` plus a `ComponentInformation` declares them modified and follows renames and mesh merges into the descriptor. That assembly only compiles with AAO 1.7 or later, and the component is removed after AAO.
+- NDMF quirks that bit: `RemoveLayer` does nothing to layers cloned with a controller when nothing has merged into it since (use `RemoveLayers`). `VirtualClip.Clone` shares curve entries, so setting a curve on a clone changes the original too; remove the binding first.
 
-## VRChat SDK (Avatars 3.10.6-beta.4)
+### Results
 
-Read from the SDK editor sources and `VRCSDK3A.dll` metadata.
+Tested end to end in Unity with Avatars SDK 3.10.6: the real NDMF pipeline on a synthetic avatar around the real controllers, with each source shape moving its own vertex. Native behaviors are evaluated with `NativeExpression.Evaluate`, and the resulting vertices compared with the original animator at 1,200 sampled states, under a layer writing what the avatar's lower layers really write. The native client itself isn't in this test.
+
+| | Plum | Chocolat |
+|---|---|---|
+| Max error (of 100), besides holds | 0.0001 | 0.0001 |
+| Face layer curves | 2,321 → 284 | 1,049 → 83 |
+| Terms left in the animator | 40 | 11 |
+| Forwards | 30 → 20 | 30 → 14 |
+| Instructions, behaviors, sets | 2045, 87, 22 | 2022, 73, 7 |
+
+The instruction budget, not the behaviors, is what stops Plum. Computing each shared factor once as a set weight (*Apply Blend Set Weight*, then `weightBlendSetName`) would roughly halve the products' cost, since the same lip suck pair appears in most of them. It's not used until chaining is verified in the client.
+
+## VRChat SDK (Avatars 3.10.6)
+
+Read from the SDK editor sources and `VRCSDK3A.dll` metadata. Between 3.10.6-beta.4 and 3.10.6 only the expression limits changed, so `NativeExpression` reads them from the installed validator, falling back to the older values.
 
 - `VRCAvatarDescriptor`: `enableFaceTracking`, `useAllTrackingKeys`, `faceTrackingMeshes`, `faceTrackingBlendshapesSetList`, `faceTrackingParameterBehaviors` (a list).
 - `FaceTrackingParameterBehavior` fields: `targetMode`, `outputParameterName`, `targetBlendSetName`, `targetBlendshapeName`, `weightBlendSetName`, `inputTrackingKeys` (int[]), `inputTrackingKeyNames`, `inputInverted`, `combineMode`, `customExpression`.
 - `ParameterBehaviorTargetMode`: ForwardToAnimator=0, ApplyBlendSetWeight, ApplyToBlendshape, LimitBlendshapeMax, LimitBlendshapeMin.
 - `ParameterBehaviorCombineMode`: Max=0, Min, Add, Multiply, Custom=4. Custom output is clamped to -1..1; the others to 0..1.
 - `FaceTrackingKey`: 102 Unified Expressions keys (EyeLookOutRight=0 … NeckFlexLeft=101, Max=102).
-- Limits: 128 behaviors, 32 inputs per behavior, 64-character parameter names; per expression 512 characters, 128 tokens, 64 instructions; 512 instructions per avatar.
+- Limits: 128 behaviors, 16 meshes, 32 inputs per behavior, 64-character parameter names; per expression 1024 characters, 256 tokens, 256 instructions, nesting and stack depth 32; 2048 instructions per avatar. In 3.10.6-beta.4: 512 characters, 128 tokens, 64 instructions, depth 16, and 512 per avatar.
 - Instruction estimate (`FaceTrackingExpressionValidator`): every number, input, function call and operator, unary minus included, counts 1; parentheses and commas are free. Non-Custom behaviors cost nothing.
 - The SDK only warns, and only for the scene avatar, so the build pass runs `FaceTrackingExpressionValidator.CollectWarnings` on the built descriptor itself.
 - Nothing in the SDK requires a forwarded parameter to be declared in Expression Parameters. The docs only mention declaring it to sync it. The tool declares forwarded inputs as unsynced (0 bits), which works either way.
-- `FaceTrackingBlendshapesSet`: `setName`, `setWeight` (initial), and per key and viseme a blendshape name and a multiplier (0..10). Per the docs, when several sets map the same blendshape the highest value wins; they don't add. The docs don't say how behaviors that write the same blendshape combine, so the bake gives each baked shape exactly one behavior.
+- `FaceTrackingBlendshapesSet`: `setName`, `setWeight` (initial), and per key and viseme a blendshape name and a multiplier (0..10). Per the docs, when several sets map the same blendshape the highest value wins; they don't add. The docs don't say how behaviors that write the same blendshape combine, so each native shape gets exactly one behavior.
 - *Apply to Blendshape*: 0..1 is weight 0..100, clamped to 0..1. `weightBlendSetName`: "the behavior then scales with that Blendshapes Set's weight".
 - `VRCAnimatorFaceTrackingBlendshapesSet` (state behaviour): up to 64 entries, each a constant or an animator parameter (optionally range-converted), with a lerp speed (0 = instant). Weights are clamped to 0..1. It applies on state entry only; the docs suggest re-entering a state to update continuously.
 
@@ -118,4 +130,11 @@ Verified so far: forwarded values reach the animator locally (mouth, tongue; eye
 4. Remote smoothness: OSCmooth's remote branch smooths more heavily than the local one, as it always did.
 5. Visemes behave as before.
 6. Performance stats: Face Tracking Operations and Forwarded Parameters (30).
-7. Zero folding: the build passes its self-check on Chocolat and Plum, and gestures and expressions look the same as without the bridge, especially mouth gestures with the mouth open.
+7. Zero folding: gestures and expressions look the same as without the bridge, especially mouth gestures with the mouth open.
+8. Migrating, in the client:
+   - the rest face and every expression look as they do with OSCmooth, apart from smoothing;
+   - set weights follow the eye and lip toggles, gestures, LR sync, QPro and Type A/B, on a remote client too;
+   - gesture shapes are hidden while tracking is on, and show when a gesture takes control;
+   - AAO keeps the native shapes;
+   - frame cost compared with mode 1.
+9. Chaining: whether an *Apply Blend Set Weight* behavior can feed another behavior's `weightBlendSetName` in the same frame, and be scaled by a set itself.

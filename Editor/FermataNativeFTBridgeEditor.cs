@@ -49,6 +49,12 @@ namespace Maberikku.FermataNativeFT.Editor
             var root = new VisualElement();
             _status = new IMGUIContainer(DrawStatus);
             root.Add(_status);
+            var migrate = new Toggle("Migrate to Native Face Tracking")
+            {
+                tooltip = "Off: keeps OSCmooth and FermataFT's blend tree. On: moves the face onto native face tracking, and removes what that leaves unused.",
+            };
+            migrate.BindProperty(serializedObject.FindProperty(nameof(FermataNativeFTBridge.migrateToNative)));
+            root.Add(migrate);
             _custom = new CustomForwardList(serializedObject, CustomForwards);
             root.Add(_custom.Root);
             root.TrackSerializedObjectValue(serializedObject, _ =>
@@ -95,7 +101,8 @@ namespace Maberikku.FermataNativeFT.Editor
                     $"Instructions: {plan.ExistingInstructions + plan.NewInstructions}/{NativeExpression.MaxInstructions}\n" +
                     $"Removed FX layer: '{FermataProfile.BinaryDecodeLayer}'\n" +
                     $"Removed Synced Parameters: {_report.SyncedBitsFreed}\n" +
-                    $"Eye Lock States: {plan.EyeLockStates.Count}",
+                    $"Eye Lock States: {plan.EyeLockStates.Count}\n" +
+                    $"Mode: {(((FermataNativeFTBridge)target).migrateToNative ? "Native, results in the NDMF console" : "OSCmooth and blend tree")}",
                     MessageType.Info);
             }
 

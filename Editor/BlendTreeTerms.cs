@@ -17,6 +17,12 @@ namespace Maberikku.FermataNativeFT.Editor
         /// <summary>A Direct blend tree child: the weight is the parameter's value.</summary>
         public readonly bool Linear;
 
+        /// <summary>The second parameter of a <see cref="Fan"/>; null for every other factor.</summary>
+        public readonly string ParameterY;
+
+        /// <summary>A Simple Directional 2D blend: values at <see cref="Positions"/> around a center, see <see cref="TwoDBlend"/>.</summary>
+        public readonly Vector2[] Positions;
+
         /// <summary>
         /// A 1D blend tree: piecewise linear through (Knots[i], Values[i]) and constant beyond the first and last knot.
         /// Values are scaled so the largest magnitude is 1; the scale is in the term's coefficient.
@@ -43,8 +49,20 @@ namespace Maberikku.FermataNativeFT.Editor
 
         public static Factor Curve(string parameter, float[] knots, float[] values) => new Factor(parameter, false, knots, values);
 
+        public static Factor Fan(string x, string y, Vector2[] positions, float[] values) => new Factor(x, y, positions, values);
+
+        Factor(string x, string y, Vector2[] positions, float[] values)
+        {
+            Parameter = x;
+            ParameterY = y;
+            Positions = positions;
+            Values = values;
+            Key = x + "," + y + "|" + string.Join(",", positions.Select((p, i) => Num(p.x) + "/" + Num(p.y) + ":" + Num(values[i])));
+        }
+
         public float Evaluate(float x)
         {
+            if (ParameterY != null) throw new InvalidOperationException("A 2D factor needs both of its parameters.");
             if (Linear) return x;
             if (x <= Knots[0]) return Values[0];
             for (var i = 1; i < Knots.Length; i++)
@@ -323,36 +341,30 @@ namespace Maberikku.FermataNativeFT.Editor
                     var order = Enumerable.Range(0, children.Count).OrderBy(i => children[i].Threshold).ToList();
                     var knots = order.Select(i => children[i].Threshold).ToArray();
                     foreach (var shape in shapes)
-                    {
-                        var terms = new List<Term>();
-                        var groups = new Dictionary<string, (Term First, float[] Values, List<Occurrence> Occurrences)>(StringComparer.Ordinal);
-                        var signatures = new List<string>();
-                        for (var k = 0; k < order.Count; k++)
+                        output[shape] = Grouped(results, order, shape, (first, values, occurrences) => Along(tree.BlendParameter, knots, values, first, occurrences, binary));
+                    break;
+                }
+                case BlendTreeType.FreeformCartesian2D when TwoDBlend.OnDiagonal(children.Select(c => c.Position).ToList()) && !binary.Contains(tree.BlendParameter) && !binary.Contains(tree.BlendParameterY):
+                {
+                    // Measured in Unity: Cartesian blends between points on the line x = y are a 1D blend on (x + y) / 2.
+                    var order = Enumerable.Range(0, children.Count).OrderBy(i => children[i].Position.x).ToList();
+                    var knots = order.Select(i => children[i].Position.x).ToArray();
+                    var average = TwoDBlend.AveragePrefix + tree.BlendParameter + "|" + tree.BlendParameterY;
+                    foreach (var shape in shapes)
+                        output[shape] = Grouped(results, order, shape, (first, values, occurrences) => Along(average, knots, values, first, occurrences, binary));
+                    break;
+                }
+                case BlendTreeType.SimpleDirectional2D when TwoDBlend.IsConvexFan(children.Select(c => c.Position).ToList()) && !binary.Contains(tree.BlendParameter) && !binary.Contains(tree.BlendParameterY):
+                {
+                    var order = Enumerable.Range(0, children.Count).ToList();
+                    var positions = children.Select(c => c.Position).ToArray();
+                    foreach (var shape in shapes)
+                        output[shape] = Grouped(results, order, shape, (first, values, occurrences) =>
                         {
-                            if (!results[order[k]].TryGetValue(shape, out var childTerms)) continue;
-                            foreach (var t in childTerms)
-                            {
-                                if (t.Opaque != null)
-                                {
-                                    terms.Add(t);
-                                    continue;
-                                }
-                                if (!groups.TryGetValue(t.Signature, out var group))
-                                {
-                                    groups[t.Signature] = group = (t, new float[order.Count], new List<Occurrence>());
-                                    signatures.Add(t.Signature);
-                                }
-                                group.Values[k] += t.Coefficient;
-                                group.Occurrences.AddRange(t.Occurrences);
-                            }
-                        }
-                        foreach (var signature in signatures)
-                        {
-                            var group = groups[signature];
-                            terms.Add(Along(tree.BlendParameter, knots, group.Values, group.First, group.Occurrences, binary));
-                        }
-                        output[shape] = Normalize(terms);
-                    }
+                            if (values.All(x => Math.Abs(x - values[0]) <= Term.Epsilon)) return first.With(values[0], occurrences);
+                            var scale = values.Max(Math.Abs);
+                            return first.With(scale, occurrences).Times(Factor.Fan(tree.BlendParameter, tree.BlendParameterY, positions, values.Select(x => x / scale).ToArray()));
+                        });
                     break;
                 }
                 default:
@@ -360,7 +372,8 @@ namespace Maberikku.FermataNativeFT.Editor
                     // 2D blends are only followed when every child produces the same weight, which makes the blend irrelevant.
                     foreach (var shape in shapes)
                     {
-                        var perChild = results.Select(r => r.TryGetValue(shape, out var t) ? t : new List<Term>()).ToList();
+                        // A child writing 0 and a child not writing the shape add the same to its value.
+                        var perChild = results.Select(r => r.TryGetValue(shape, out var t) ? t.Where(x => !x.IsZero).ToList() : new List<Term>()).ToList();
                         var descriptions = perChild.Select(Describe).ToList();
                         if (descriptions.All(d => d == descriptions[0]))
                         {
@@ -376,6 +389,39 @@ namespace Maberikku.FermataNativeFT.Editor
                 }
             }
             return output;
+        }
+
+        /// <summary>The children's terms for a shape, gathered by signature so each can become one term over the blend's parameters.</summary>
+        static List<Term> Grouped(List<Dictionary<(string, string), List<Term>>> results, List<int> order, (string, string) shape, Func<Term, float[], List<Occurrence>, Term> build)
+        {
+            var terms = new List<Term>();
+            var groups = new Dictionary<string, (Term First, float[] Values, List<Occurrence> Occurrences)>(StringComparer.Ordinal);
+            var signatures = new List<string>();
+            for (var k = 0; k < order.Count; k++)
+            {
+                if (!results[order[k]].TryGetValue(shape, out var childTerms)) continue;
+                foreach (var t in childTerms)
+                {
+                    if (t.Opaque != null)
+                    {
+                        terms.Add(t);
+                        continue;
+                    }
+                    if (!groups.TryGetValue(t.Signature, out var group))
+                    {
+                        groups[t.Signature] = group = (t, new float[order.Count], new List<Occurrence>());
+                        signatures.Add(t.Signature);
+                    }
+                    group.Values[k] += t.Coefficient;
+                    group.Occurrences.AddRange(t.Occurrences);
+                }
+            }
+            foreach (var signature in signatures)
+            {
+                var group = groups[signature];
+                terms.Add(build(group.First, group.Values, group.Occurrences));
+            }
+            return Normalize(terms);
         }
 
         /// <summary>A 1D tree's sum of child terms with one signature: the children's coefficients interpolated over the parameter.</summary>

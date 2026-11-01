@@ -45,4 +45,4 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   customForwards: []
-  bakeExactShapes: 0
+  migrateToNative: 0

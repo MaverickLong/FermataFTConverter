@@ -118,11 +118,11 @@ namespace Maberikku.FermataNativeFT.Editor
     }
 
     /// <summary>
-    /// Bakes the parts of FermataFT's face that native face tracking can reproduce exactly. A single-state, Write
+    /// Migrates what native face tracking can reproduce exactly off FermataFT's face layers. A single-state, Write
     /// Defaults blend-tree layer that reads forwarded inputs is rewritten as a sum of terms per blendshape (see
     /// <see cref="BlendTreeTerms"/>). A term moves to native face tracking when it depends on forwarded inputs through
     /// piecewise linear factors, and on other animator parameters only through factors the animator can still compute.
-    /// The term's clips stop animating that blendshape, and new blendshapes made from the same mesh deltas take over:
+    /// The term's clips write 0 to that blendshape instead, and new blendshapes made from the same mesh deltas take over:
     /// <list type="bullet">
     /// <item>one input: one blendshape per linear segment of its curve, driven by that segment clamped to 0..1;</item>
     /// <item>several inputs: one blendshape driven by the whole product as a custom expression.</item>
@@ -179,8 +179,14 @@ namespace Maberikku.FermataNativeFT.Editor
             public VirtualState State;
             public Dictionary<(string Path, string Name), List<Term>> Before;
 
-            /// <summary>Blendshapes some other layer animates; baking them would change how the layers combine.</summary>
-            public HashSet<(string, string)> Elsewhere;
+            /// <summary>Blendshapes a layer above this one animates: it can override the original shape but not a baked one.</summary>
+            public HashSet<(string, string)> Later;
+
+            /// <summary>Blendshapes the layers below animate. This layer hides them only while it writes them, so it keeps doing so.</summary>
+            public HashSet<(string, string)> Below;
+
+            /// <summary>The layer's motion before anything changed, to compare which blendshapes it writes.</summary>
+            public VirtualMotion Original;
         }
 
         /// <summary>Everything one bake decides, accumulated over its selection rounds.</summary>
@@ -205,6 +211,12 @@ namespace Maberikku.FermataNativeFT.Editor
             public int SmoothingCurves;
 
             public bool SmoothingRemoved;
+
+            /// <summary>Averages of two forwarded inputs that 2D blends read, and the inputs behind them.</summary>
+            public readonly Dictionary<ForwardTarget, ForwardTarget[]> Averages = new Dictionary<ForwardTarget, ForwardTarget[]>();
+
+            /// <summary>What only the smoothing layer writes but other layers read; those branches of it stay.</summary>
+            public HashSet<string> Stranded = new HashSet<string>(StringComparer.Ordinal);
 
             public Transform Root;
             public VirtualAnimatorController Fx;
@@ -354,7 +366,7 @@ namespace Maberikku.FermataNativeFT.Editor
         /// Plays both motions at sampled parameter values and compares which blendshapes an active clip writes: anything
         /// no active clip writes shows the layers below. 2D blends count every child as active. Null when they agree.
         /// </summary>
-        static string ActivationMismatch(VirtualMotion a, VirtualMotion b)
+        static string ActivationMismatch(VirtualMotion a, VirtualMotion b, HashSet<(string, string)> only = null, bool mayHoldMore = false)
         {
             var parameters = BlendTreeTerms.Parameters(a).Concat(BlendTreeTerms.Parameters(b))
                 .Where(p => p != OneParameter).Distinct().OrderBy(p => p, StringComparer.Ordinal).ToList();
@@ -369,7 +381,12 @@ namespace Maberikku.FermataNativeFT.Editor
                 var writtenB = new HashSet<(string, string)>();
                 Written(a, values, writtenA);
                 Written(b, values, writtenB);
-                if (writtenA.SetEquals(writtenB)) continue;
+                if (only != null)
+                {
+                    writtenA.IntersectWith(only);
+                    writtenB.IntersectWith(only);
+                }
+                if (mayHoldMore ? writtenA.IsSubsetOf(writtenB) : writtenA.SetEquals(writtenB)) continue;
                 var differ = writtenA.Except(writtenB).Concat(writtenB.Except(writtenA)).First();
                 var state = string.Join(", ", values.Where(v => v.Key != OneParameter).Select(v => $"{v.Key}={v.Value.ToString("0.###", CultureInfo.InvariantCulture)}"));
                 return $"{differ.Item1}:{differ.Item2} is active {(writtenA.Contains(differ) ? "only before" : "only after")} folding at {state}";
@@ -420,13 +437,15 @@ namespace Maberikku.FermataNativeFT.Editor
             catch (Exception e)
             {
                 Debug.LogException(e);
-                BridgeError.Report(ErrorSeverity.NonFatal, $"Shape Bake: skipped ({e.Message}).");
+                BridgeError.Report(ErrorSeverity.NonFatal, $"Native Face Tracking: skipped ({e.Message}). Kept OSCmooth and the blend tree.");
+                Fold(context.AvatarRootTransform, fx, survey);
                 return;
             }
             if (plan.Layers.Count == 0)
             {
                 var why = plan.Notes.Count > 0 ? string.Join("; ", plan.Notes) : "no blend-tree layer reads the forwarded inputs";
-                BridgeError.Report(ErrorSeverity.NonFatal, $"Shape Bake: nothing baked ({why}).");
+                BridgeError.Report(ErrorSeverity.NonFatal, $"Native Face Tracking: skipped ({why}). Kept OSCmooth and the blend tree.");
+                Fold(context.AvatarRootTransform, fx, survey);
                 return;
             }
 
@@ -437,20 +456,24 @@ namespace Maberikku.FermataNativeFT.Editor
             for (var round = 0; round < maxRounds; round++)
             {
                 Strip(SelectRound(plan));
+                Settle(plan);
                 if (TrimForwards(plan) == 0) break;
             }
             if (plan.Accepted.Count == 0 && plan.Trimmed.Count == 0)
             {
-                BridgeError.Report(ErrorSeverity.NonFatal, "Shape Bake: nothing baked (no exactly bakeable shapes fit the budget).");
+                BridgeError.Report(ErrorSeverity.NonFatal, "Native Face Tracking: nothing migrated (no exact shapes fit the budget).");
                 return;
             }
 
             // Native shapes follow tracking directly; the animator's part must see the same values at the same time.
             if (plan.Accepted.Count > 0) DisableSmoothing(plan);
 
-            var empty = VirtualClip.Create(NamePrefix + "Empty");
-            foreach (var bake in plan.Layers) bake.State.Motion = Prune(bake.State.Motion, empty);
             plan.TreeAfter = Count(plan.Layers.Select(l => l.State.Motion));
+
+            // A face layer with nothing left has no reason to exist, unless something refers to it.
+            foreach (var bake in plan.Layers)
+                if (Count(new[] { bake.State.Motion }).Curves == 0)
+                    fx.RemoveLayers(l => l == bake.Layer);
 
             Finish(context, fx, descriptor, plan);
 
@@ -458,20 +481,108 @@ namespace Maberikku.FermataNativeFT.Editor
             if (problems.Count > 0)
             {
                 foreach (var problem in problems)
-                    BridgeError.Report(ErrorSeverity.Error, "Shape Bake self-check failed: " + problem);
+                    BridgeError.Report(ErrorSeverity.Error, "Native Face Tracking self-check failed: " + problem);
                 return;
             }
 
-            Debug.Log($"[{Messages.Title}] Shape Bake details:\n" + string.Join("\n", plan.Pieces.Select(p =>
+            Debug.Log($"[{Messages.Title}] Native shapes:\n" + string.Join("\n", plan.Pieces.Select(p =>
                 $"{p.Blendshape} = {p.Driver.Key} ({p.Driver.Instructions} instr), gate {p.Gate?.Name ?? "none"}: " +
                 string.Join(", ", p.Contributions.Select(c => $"{c.Key.Name} {c.Value.ToString("0.##", CultureInfo.InvariantCulture)}")))));
-            var shapes = plan.Accepted.Select(c => c.Shape).Distinct().Count();
+            var left = plan.Layers.SelectMany(bake => BlendTreeTerms.Analyze(bake.State, plan.Binary).SelectMany(kv => kv.Value.Select(t => (kv.Key.Name, t)))).ToList();
+            if (left.Count > 0)
+                Debug.Log($"[{Messages.Title}] Left in the animator:\n" + string.Join("\n", left.Select(x => $"{x.Name}: {x.t.Opaque ?? Describe(x.t)}")));
+            var instructions = (plan.Descriptor.faceTrackingParameterBehaviors ?? new List<VRCAvatarDescriptor.FaceTrackingParameterBehavior>())
+                .Where(b => b != null && b.combineMode == VRCAvatarDescriptor.ParameterBehaviorCombineMode.Custom && !string.IsNullOrWhiteSpace(b.customExpression))
+                .Sum(b => NativeExpression.CountInstructions(b.customExpression));
             BridgeError.Report(ErrorSeverity.Information,
-                $"Shape Bake: {plan.Accepted.Count} terms of {shapes} blendshapes, {plan.Pieces.Count} native shapes, " +
-                $"{plan.Pieces.Sum(p => p.Driver.Instructions)} instructions, {plan.Gates.Count} gates, " +
-                $"{plan.Trimmed.Count} forwards dropped ({plan.Trimmed.Sum(t => t.Instructions)} instructions). " +
-                $"Face tree: {plan.TreeBefore.Curves} -> {plan.TreeAfter.Curves} curves, {plan.TreeBefore.Nodes} -> {plan.TreeAfter.Nodes} nodes. " +
-                (plan.SmoothingRemoved ? $"OSCmooth: off ({plan.SmoothingCurves} curves)." : "OSCmooth: kept."));
+                $"Native Face Tracking: {plan.Accepted.Count} terms, {left.Count} left in the animator. " +
+                $"Instructions: {instructions}/{NativeExpression.MaxInstructions}. " +
+                $"Behaviors: {plan.Descriptor.faceTrackingParameterBehaviors?.Count ?? 0}/{NativeExpression.MaxBehaviors}. " +
+                $"Forwards dropped: {plan.Trimmed.Count}. " +
+                $"Face tree: {plan.TreeBefore.Curves} -> {plan.TreeAfter.Curves} curves. " +
+                (plan.SmoothingRemoved ? $"OSCmooth: -{plan.SmoothingCurves} curves." : "OSCmooth: kept."));
+        }
+
+        /// <summary>
+        /// Takes zero curves out from under forwarded inputs, so what hides the layers below follows the gates (tracking
+        /// on, no gesture in control) and not the tracking values. FermataFT holds some gesture shapes at 0 only over part
+        /// of an input's range, for example, which would keep most of the tree and its forwards alive.
+        /// </summary>
+        static VirtualMotion Lift(VirtualMotion motion, HashSet<(string, string)> zero, Dictionary<string, ForwardTarget> inputs)
+        {
+            if (!(motion is VirtualBlendTree tree)) return motion;
+            if (tree.BlendType == BlendTreeType.Direct)
+            {
+                var children = new List<VirtualBlendTree.VirtualChildMotion>();
+                var lifted = new HashSet<(string, string)>();
+                foreach (var child in tree.Children)
+                {
+                    if (!inputs.ContainsKey(child.DirectBlendParameter))
+                    {
+                        children.Add(WithMotion(child, Lift(child.Motion, zero, inputs)));
+                        continue;
+                    }
+                    lifted.UnionWith(Contained(child.Motion, zero));
+                    children.Add(WithMotion(child, Without(child.Motion, zero)));
+                }
+                if (lifted.Count > 0 && !tree.NormalizedBlendValues)
+                    children.Add(new VirtualBlendTree.VirtualChildMotion { Motion = ZeroClip(lifted), DirectBlendParameter = OneParameter });
+                tree.Children = children.ToImmutableList();
+                return tree;
+            }
+
+            var tracked = inputs.ContainsKey(tree.BlendParameter) || (tree.BlendType != BlendTreeType.Simple1D && inputs.ContainsKey(tree.BlendParameterY));
+            if (!tracked)
+            {
+                tree.Children = tree.Children.Select(c => WithMotion(c, Lift(c.Motion, zero, inputs))).ToImmutableList();
+                return tree;
+            }
+            var inside = Contained(tree, zero);
+            if (inside.Count == 0) return tree;
+            var stripped = Without(tree, zero);
+            var hold = VirtualBlendTree.Create(NamePrefix + "Hold");
+            hold.BlendType = BlendTreeType.Direct;
+            hold.Children = ImmutableList.Create(
+                new VirtualBlendTree.VirtualChildMotion { Motion = stripped, DirectBlendParameter = OneParameter },
+                new VirtualBlendTree.VirtualChildMotion { Motion = ZeroClip(inside), DirectBlendParameter = OneParameter });
+            return hold;
+        }
+
+        static HashSet<(string, string)> Contained(VirtualMotion motion, HashSet<(string, string)> shapes)
+        {
+            var found = new HashSet<(string, string)>();
+            void Walk(VirtualMotion m)
+            {
+                if (m is VirtualClip clip) found.UnionWith(BlendshapeBindings(clip).Where(shapes.Contains));
+                else if (m is VirtualBlendTree tree)
+                    foreach (var child in tree.Children) Walk(child.Motion);
+            }
+            Walk(motion);
+            return found;
+        }
+
+        /// <summary>
+        /// After terms move, their clips hold zeros. A shape the layers below also animate keeps those, folded, so this
+        /// layer goes on hiding them exactly when it did. Any other zero-only shape loses them: the layer writing 0 or
+        /// nothing at all then look the same.
+        /// </summary>
+        static void Settle(Plan plan)
+        {
+            var empty = VirtualClip.Create(NamePrefix + "Empty");
+            foreach (var bake in plan.Layers)
+            {
+                var zero = ZeroOnly(plan.Root, bake.State);
+                var free = new HashSet<(string, string)>(zero.Where(s => !bake.Below.Contains(s)));
+                zero.ExceptWith(free);
+                bake.State.Motion = Without(bake.State.Motion, free);
+                if (zero.Count > 0)
+                {
+                    EnsureOne(plan.Fx);
+                    bake.State.Motion = Lift(bake.State.Motion, zero, plan.Inputs);
+                    bake.State.Motion = Hoist(plan.Fx, bake.State.Motion, zero, new HashSet<string>(StringComparer.Ordinal));
+                }
+                bake.State.Motion = Prune(bake.State.Motion, empty);
+            }
         }
 
         /// <summary>Finds the bakeable layers and everything that stays fixed while terms are selected.</summary>
@@ -497,18 +608,26 @@ namespace Maberikku.FermataNativeFT.Editor
             foreach (var (layer, state) in survey.FaceLayers)
             {
                 BlendTreeTerms.Detach(state);
-                plan.Layers.Add(new LayerBake { Layer = layer, State = state, Before = BlendTreeTerms.Analyze(state, plan.Binary) });
+                var original = state.Motion;
+                BlendTreeTerms.Detach(state);
+                plan.Layers.Add(new LayerBake { Layer = layer, State = state, Original = original, Before = BlendTreeTerms.Analyze(state, plan.Binary) });
             }
             plan.Reserved = DescriptorShapes(root, descriptor);
             var writes = plan.AllLayers.ToDictionary(l => l, BlendshapeWrites);
+            // FX plays last, so every other controller is below it, and FX's own layers play in order.
+            var order = fx.Layers.ToList();
             foreach (var bake in plan.Layers)
-                bake.Elsewhere = new HashSet<(string, string)>(plan.AllLayers.Where(l => l != bake.Layer).SelectMany(l => writes[l]));
+            {
+                var later = order.Skip(order.IndexOf(bake.Layer) + 1).ToList();
+                bake.Later = new HashSet<(string, string)>(later.SelectMany(l => writes[l]));
+                bake.Below = new HashSet<(string, string)>(plan.AllLayers.Where(l => l != bake.Layer && !later.Contains(l)).SelectMany(l => writes[l]));
+            }
             return plan;
         }
 
         /// <summary>
-        /// Why OSCmooth's smoothing can't be switched off (null when it can): something outside the smoothing layer
-        /// reads a parameter that only the smoothing layer writes and that no forward could write directly instead.
+        /// Finds what other layers read from the smoothing layer that no forward could write instead, such as Plum's
+        /// smoothed QPro toggle. Those branches stay. Returns why that isn't possible, or null.
         /// </summary>
         static string SmoothingProblem(Plan plan)
         {
@@ -516,11 +635,27 @@ namespace Maberikku.FermataNativeFT.Editor
             var reads = new HashSet<string>(StringComparer.Ordinal);
             foreach (var layer in plan.AllLayers.Where(l => l != plan.Smoothing))
                 reads.UnionWith(LiveReads(layer));
-            var stranded = plan.SmoothingInfo.Writes
-                .Where(p => reads.Contains(p) && !(plan.Inputs.TryGetValue(p, out var t) && p == FermataProfile.ProxyPrefix + t.Parameter))
-                .OrderBy(p => p, StringComparer.Ordinal).ToList();
-            return stranded.Count == 0 ? null
-                : $"OSCmooth can't be turned off: '{plan.Smoothing.Name}' also writes {string.Join(", ", stranded.Select(p => $"'{p}'"))}, which other layers read";
+            plan.Stranded.UnionWith(plan.SmoothingInfo.Writes
+                .Where(p => reads.Contains(p) && !(plan.Inputs.TryGetValue(p, out var t) && p == FermataProfile.ProxyPrefix + t.Parameter)));
+            if (plan.Stranded.Count == 0) return null;
+            var separable = (plan.Smoothing.StateMachine?.AllStates() ?? Enumerable.Empty<VirtualState>())
+                .All(s => s.Motion == null || (s.Motion is VirtualBlendTree tree && tree.BlendType == BlendTreeType.Direct));
+            return separable ? null
+                : $"OSCmooth can't be turned off: '{plan.Smoothing.Name}' also writes {string.Join(", ", plan.Stranded.OrderBy(p => p, StringComparer.Ordinal).Select(p => $"'{p}'"))}, which other layers read";
+        }
+
+        /// <summary>Whether any clip in the motion writes one of these animator parameters.</summary>
+        static bool WritesParameter(VirtualMotion motion, HashSet<string> parameters)
+        {
+            switch (motion)
+            {
+                case VirtualClip clip:
+                    return clip.GetFloatCurveBindings().Any(b => b.type == typeof(Animator) && parameters.Contains(b.propertyName));
+                case VirtualBlendTree tree:
+                    return tree.Children.Any(c => WritesParameter(c.Motion, parameters));
+                default:
+                    return false;
+            }
         }
 
         /// <summary>
@@ -541,8 +676,16 @@ namespace Maberikku.FermataNativeFT.Editor
                         b.outputParameterName = proxy;
             }
 
-            plan.SmoothingCurves = Count(smoothing.StateMachine?.AllStates().Select(s => s.Motion) ?? Enumerable.Empty<VirtualMotion>()).Curves;
-            if (plan.Survey.Controlled.Contains(smoothing.VirtualLayerIndex) || plan.Survey.Named.Contains(smoothing.Name))
+            var states = smoothing.StateMachine?.AllStates().ToList() ?? new List<VirtualState>();
+            plan.SmoothingCurves = Count(states.Select(s => s.Motion)).Curves;
+            if (plan.Stranded.Count > 0)
+            {
+                foreach (var state in states)
+                    if (state.Motion is VirtualBlendTree tree)
+                        tree.Children = tree.Children.Where(c => WritesParameter(c.Motion, plan.Stranded)).ToImmutableList();
+                plan.SmoothingCurves -= Count(states.Select(s => s.Motion)).Curves;
+            }
+            else if (plan.Survey.Controlled.Contains(smoothing.VirtualLayerIndex) || plan.Survey.Named.Contains(smoothing.Name))
             {
                 foreach (var state in smoothing.StateMachine?.AllStates() ?? Enumerable.Empty<VirtualState>())
                     state.Motion = null;
@@ -563,7 +706,7 @@ namespace Maberikku.FermataNativeFT.Editor
                 var current = BlendTreeTerms.Analyze(bake.State, plan.Binary);
                 foreach (var pair in current.OrderBy(p => p.Key.Path, StringComparer.Ordinal).ThenBy(p => p.Key.Name, StringComparer.Ordinal))
                 {
-                    if (bake.Elsewhere.Contains(pair.Key) || plan.Reserved.Contains(pair.Key)) continue;
+                    if (bake.Later.Contains(pair.Key) || plan.Reserved.Contains(pair.Key)) continue;
                     var source = GetSource(plan.Root, pair.Key, plan.Sources);
                     if (source == null) continue;
                     foreach (var term in pair.Value)
@@ -686,6 +829,10 @@ namespace Maberikku.FermataNativeFT.Editor
             var rest = plan.Rest;
             var gates = plan.GateByKey;
             if (term.Opaque != null || term.IsZero) return null;
+            foreach (var f in term.Factors)
+                if (!DefineAverage(plan, f.Parameter)) return null;
+            // A 2D factor needs both of its parameters forwarded: it's computed in the expression, not the animator.
+            if (term.Factors.Any(f => f.ParameterY != null && !(inputs.ContainsKey(f.Parameter) && inputs.ContainsKey(f.ParameterY)))) return null;
             var tracked = term.Factors.Where(f => inputs.ContainsKey(f.Parameter)).ToList();
             var others = term.Factors.Where(f => !inputs.ContainsKey(f.Parameter)).ToList();
             if (tracked.Count == 0 || tracked.Any(f => !rest.ContainsKey(inputs[f.Parameter]))) return null;
@@ -701,7 +848,7 @@ namespace Maberikku.FermataNativeFT.Editor
 
             List<(BakeDriver, float)> parts;
             float magnitude;
-            if (tracked.Count == 1 && Math.Abs(tracked[0].Evaluate(rest[inputs[tracked[0].Parameter]])) <= Term.Epsilon)
+            if (tracked.Count == 1 && tracked[0].ParameterY == null && Math.Abs(tracked[0].Evaluate(rest[inputs[tracked[0].Parameter]])) <= Term.Epsilon)
             {
                 var input = inputs[tracked[0].Parameter];
                 parts = Segments(term.Coefficient, tracked[0], input, rest[input]);
@@ -722,9 +869,36 @@ namespace Maberikku.FermataNativeFT.Editor
                 Parts = parts,
                 Source = source,
                 Curves = term.Occurrences.Count,
-                Targets = tracked.Select(f => inputs[f.Parameter]).Distinct().ToList(),
+                Targets = tracked.SelectMany(f => TargetsOf(plan, f)).Distinct().ToList(),
                 Movement = Math.Abs(term.Coefficient) * magnitude * source.Displacement / source.FrameWeight,
             };
+        }
+
+        /// <summary>
+        /// Makes the average two forwarded inputs a 2D blend reads available as an input of its own. False when the name
+        /// is an average that can't be: an input the animator owns, or one whose forwarded value is clamped, since the
+        /// expression averages the unclamped values.
+        /// </summary>
+        static bool DefineAverage(Plan plan, string parameter)
+        {
+            if (!parameter.StartsWith(TwoDBlend.AveragePrefix, StringComparison.Ordinal) || plan.Inputs.ContainsKey(parameter)) return true;
+            var names = parameter.Substring(TwoDBlend.AveragePrefix.Length).Split('|');
+            if (names.Length != 2 || !plan.Inputs.TryGetValue(names[0], out var x) || !plan.Inputs.TryGetValue(names[1], out var y)) return false;
+            if (LinearForm.Of(x.Expression).Terms.Concat(LinearForm.Of(y.Expression).Terms).Any(t => t.Atom.StartsWith("clamp(", StringComparison.Ordinal))) return false;
+            var average = new ForwardTarget(parameter, $"(({x.Expression}) + ({y.Expression})) * 0.5", null, false);
+            plan.Inputs[parameter] = average;
+            plan.Averages[average] = new[] { x, y };
+            var value = NativeExpression.Evaluate(average.Expression);
+            if (value.HasValue) plan.Rest[average] = Mathf.Clamp(value.Value, -1f, 1f);
+            return true;
+        }
+
+        /// <summary>The real forwarded inputs a factor reads.</summary>
+        static IEnumerable<ForwardTarget> TargetsOf(Plan plan, Factor factor)
+        {
+            var input = plan.Inputs[factor.Parameter];
+            if (plan.Averages.TryGetValue(input, out var both)) return both;
+            return factor.ParameterY != null ? new[] { input, plan.Inputs[factor.ParameterY] } : new[] { input };
         }
 
         /// <summary>
@@ -750,9 +924,8 @@ namespace Maberikku.FermataNativeFT.Editor
         static BakeDriver Ramp(ForwardTarget input, float a, float b, bool rising)
         {
             if (input.SingleKey != null && a == 0f && b == 1f) return BakeDriver.Passthrough(input.SingleKey, !rising);
-            var e = Wrap(input.Expression);
-            var scale = 1f / (b - a);
-            return BakeDriver.Custom(rising ? Scale(Offset(e, a), scale) : Scale(b == 0f ? "-" + e : Num(b) + " - " + e, scale));
+            var form = LinearForm.Of(input.Expression);
+            return BakeDriver.Custom(rising ? ExpressionText.Ramp(form, a, b) : ExpressionText.Ramp(form, b, a));
         }
 
         /// <summary>The whole term as one expression, split by sign since a native output is clamped to 0..1.</summary>
@@ -763,14 +936,21 @@ namespace Maberikku.FermataNativeFT.Editor
             foreach (var factor in factors)
             {
                 var input = inputs[factor.Parameter];
+                if (factor.ParameterY != null)
+                {
+                    texts.Add(ExpressionText.Wrap(TwoDBlend.Text(factor, input.Expression, inputs[factor.ParameterY].Expression)));
+                    var ends = new[] { low * factor.Values.Min(), low * factor.Values.Max(), high * factor.Values.Min(), high * factor.Values.Max() };
+                    low = ends.Min();
+                    high = ends.Max();
+                    continue;
+                }
                 var (knots, values) = Restrict(factor, input, null);
-                var text = PiecewiseText(input, knots, values);
-                if (text == null)
+                if (Enumerable.Range(0, knots.Count - 1).Any(i => knots[i + 1] - knots[i] < 1e-4f && Math.Abs(values[i + 1] - values[i]) > Term.Epsilon))
                 {
                     magnitude = 0f;
                     return null;
                 }
-                texts.Add(Wrap(text));
+                texts.Add(ExpressionText.Wrap(ExpressionText.Piecewise(LinearForm.Of(input.Expression), knots, values)));
                 float min = values.Min(), max = values.Max();
                 var corners = new[] { low * min, low * max, high * min, high * max };
                 low = corners.Min();
@@ -780,76 +960,21 @@ namespace Maberikku.FermataNativeFT.Editor
             var product = string.Join(" * ", texts);
             var parts = new List<(BakeDriver, float)>();
             if (high > Term.Epsilon) parts.Add((BakeDriver.Custom(product), coefficient));
-            if (low < -Term.Epsilon) parts.Add((BakeDriver.Custom("-" + Wrap(product)), -coefficient));
+            if (low < -Term.Epsilon) parts.Add((BakeDriver.Custom("-" + ExpressionText.Wrap(product)), -coefficient));
             return parts;
         }
 
-        /// <summary>F(E) as its value at the bottom of the input's range plus a clamped ramp per segment.</summary>
-        static string PiecewiseText(ForwardTarget input, List<float> knots, List<float> values)
-        {
-            var text = Math.Abs(values[0]) > Term.Epsilon ? Num(values[0]) : null;
-            for (var i = 0; i + 1 < knots.Count; i++)
-            {
-                float a = knots[i], b = knots[i + 1], rise = values[i + 1] - values[i];
-                if (Math.Abs(rise) <= Term.Epsilon) continue;
-                if (b - a < 1e-4f) return null;
-                var ramp = ClampedRamp(input, a, b);
-                var size = Math.Abs(rise);
-                var scaled = Math.Abs(size - 1f) <= Term.Epsilon ? ramp : Num(size) + " * " + ramp;
-                text = text == null ? (rise > 0 ? scaled : "-" + scaled) : text + (rise > 0 ? " + " : " - ") + scaled;
-            }
-            return text ?? "0";
-        }
-
-        /// <summary>clamp((E - a) / (b - a), 0, 1), leaving out bounds a single tracking key (0..1) can't cross.</summary>
-        static string ClampedRamp(ForwardTarget input, float a, float b)
-        {
-            var inner = Scale(Offset(Wrap(input.Expression), a), 1f / (b - a));
-            if (input.SingleKey != null)
-            {
-                if (a <= 0f && b >= 1f) return inner;
-                if (a <= 0f) return $"min(1, {inner})";
-                if (b >= 1f) return $"max(0, {inner})";
-            }
-            return $"clamp({inner}, 0, 1)";
-        }
-
-        /// <summary>
-        /// The factor's knots and values over the range its input can take: 0..1 for a single tracking key, -1..1
-        /// otherwise (forwarded values are clamped to it). The rest value, if given, becomes a knot.
-        /// </summary>
+        /// <summary>The factor's knots and values over the range its input can actually take. The rest value, if given, becomes a knot.</summary>
         static (List<float>, List<float>) Restrict(Factor factor, ForwardTarget input, float? rest)
         {
-            float low = input.SingleKey != null ? 0f : -1f, high = 1f;
+            var form = LinearForm.Of(input.Expression);
+            float low = form.Low, high = form.High;
             var knots = new List<float> { low, high };
             if (rest.HasValue) knots.Add(Mathf.Clamp(rest.Value, low, high));
             if (!factor.Linear) knots.AddRange(factor.Knots.Where(k => k > low && k < high));
             knots = knots.Distinct().OrderBy(k => k).ToList();
             return (knots, knots.Select(factor.Evaluate).ToList());
         }
-
-        static string Offset(string e, float a) => a == 0f ? e : a > 0f ? e + " - " + Num(a) : e + " + " + Num(-a);
-
-        static string Scale(string x, float k) => Math.Abs(k - 1f) <= Term.Epsilon ? x : Wrap(x) + " * " + Num(k);
-
-        static string Wrap(string e) => IsAtom(e) || IsWrapped(e) ? e : "(" + e + ")";
-
-        static bool IsAtom(string e) => e.All(c => char.IsLetterOrDigit(c) || c == '_' || c == '.');
-
-        /// <summary>True when the whole text is one parenthesised group.</summary>
-        static bool IsWrapped(string e)
-        {
-            if (e.Length < 2 || e[0] != '(') return false;
-            var depth = 0;
-            for (var i = 0; i < e.Length; i++)
-            {
-                if (e[i] == '(') depth++;
-                else if (e[i] == ')' && --depth == 0) return i == e.Length - 1;
-            }
-            return false;
-        }
-
-        static string Num(float v) => v.ToString("0.######", CultureInfo.InvariantCulture);
 
         /// <summary>
         /// Picks terms by the curves they take out of the blend tree per instruction, until the next one would exceed a
@@ -932,7 +1057,10 @@ namespace Maberikku.FermataNativeFT.Editor
 
         static string PieceKey(BakeDriver driver, BakeGate gate) => driver.Key + "@" + (gate?.Key ?? "");
 
-        /// <summary>The animator stops producing the accepted terms: their clip slots no longer animate those blendshapes.</summary>
+        /// <summary>
+        /// The animator stops producing the accepted terms: their clip slots write 0 instead. They still write, because
+        /// an active clip writing a shape is what hides the layers below; <see cref="Settle"/> tidies up what's left.
+        /// </summary>
         static void Strip(List<Candidate> accepted)
         {
             var removals = new Dictionary<Occurrence, List<(string Path, string Name)>>();
@@ -946,7 +1074,12 @@ namespace Maberikku.FermataNativeFT.Editor
             {
                 var clip = pair.Key.Clip.Clone();
                 foreach (var (path, name) in pair.Value)
+                {
+                    // A cloned clip shares its curve entries with the original: changing one in place changes them all, and
+                    // removing it first gives this clip its own.
                     clip.SetFloatCurve(path, typeof(SkinnedMeshRenderer), BlendTreeTerms.BlendShapePrefix + name, null);
+                    clip.SetFloatCurve(path, typeof(SkinnedMeshRenderer), BlendTreeTerms.BlendShapePrefix + name, AnimationCurve.Constant(0f, 1f / 60f, 0f));
+                }
                 pair.Key.SetClip(clip);
             }
         }
@@ -1152,9 +1285,18 @@ namespace Maberikku.FermataNativeFT.Editor
         /// </summary>
         static HashSet<(string, string)> FoldZeros(VirtualAnimatorController fx, Transform root, VirtualState state)
         {
+            var fold = ZeroOnly(root, state);
+            if (fold.Count == 0) return fold;
+            var before = Count(new[] { state.Motion }).Curves;
+            state.Motion = Hoist(fx, state.Motion, fold, new HashSet<string>(StringComparer.Ordinal));
+            return Count(new[] { state.Motion }).Curves < before ? fold : new HashSet<(string, string)>();
+        }
+
+        /// <summary>Blendshapes the state's motion only ever sets to 0, and that rest at 0 on their renderer.</summary>
+        static HashSet<(string, string)> ZeroOnly(Transform root, VirtualState state)
+        {
             var zeroOnly = new Dictionary<(string, string), bool>();
-            var slots = BlendTreeTerms.Slots(state).ToList();
-            foreach (var slot in slots)
+            foreach (var slot in BlendTreeTerms.Slots(state))
             {
                 var clip = slot.Clip;
                 foreach (var b in clip.GetFloatCurveBindings())
@@ -1165,11 +1307,7 @@ namespace Maberikku.FermataNativeFT.Editor
                     zeroOnly[shape] = (!zeroOnly.TryGetValue(shape, out var soFar) || soFar) && zero;
                 }
             }
-            var fold = new HashSet<(string, string)>(zeroOnly.Where(kv => kv.Value && RestsAtZero(root, kv.Key)).Select(kv => kv.Key));
-            if (fold.Count == 0) return fold;
-            var before = Count(new[] { state.Motion }).Curves;
-            state.Motion = Hoist(fx, state.Motion, fold, new HashSet<string>(StringComparer.Ordinal));
-            return Count(new[] { state.Motion }).Curves < before ? fold : new HashSet<(string, string)>();
+            return new HashSet<(string, string)>(zeroOnly.Where(kv => kv.Value && RestsAtZero(root, kv.Key)).Select(kv => kv.Key));
         }
 
         /// <summary>
@@ -1612,6 +1750,8 @@ namespace Maberikku.FermataNativeFT.Editor
                     var k = string.Join(" + ", actual.OrderBy(s => s, StringComparer.Ordinal));
                     if (e != k) problems.Add($"'{bake.Layer.Name}' {shape.Path}:{shape.Name} kept {k}, expected {e}.");
                 }
+                var mismatch = ActivationMismatch(bake.Original, bake.State.Motion, bake.Below, true);
+                if (mismatch != null) problems.Add($"'{bake.Layer.Name}' {mismatch}.");
             }
 
             foreach (var layer in plan.AllLayers.Where(l => l != plan.Smoothing))
