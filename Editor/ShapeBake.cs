@@ -488,6 +488,7 @@ namespace Maberikku.FermataNativeFT.Editor
             Debug.Log($"[{Messages.Title}] Native shapes:\n" + string.Join("\n", plan.Pieces.Select(p =>
                 $"{p.Blendshape} = {p.Driver.Key} ({p.Driver.Instructions} instr), gate {p.Gate?.Name ?? "none"}: " +
                 string.Join(", ", p.Contributions.Select(c => $"{c.Key.Name} {c.Value.ToString("0.##", CultureInfo.InvariantCulture)}")))));
+            Debug.Log($"[{Messages.Title}] Gates:\n" + string.Join("\n", plan.Gates.Select(g => $"{g.Name} = {g.Key}")));
             var left = plan.Layers.SelectMany(bake => BlendTreeTerms.Analyze(bake.State, plan.Binary).SelectMany(kv => kv.Value.Select(t => (kv.Key.Name, t)))).ToList();
             if (left.Count > 0)
                 Debug.Log($"[{Messages.Title}] Left in the animator:\n" + string.Join("\n", left.Select(x => $"{x.Name}: {x.t.Opaque ?? Describe(x.t)}")));
