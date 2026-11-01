@@ -1604,6 +1604,13 @@ namespace Maberikku.FermataNativeFT.Editor
         const int GateSteps = 20;
 
         /// <summary>
+        /// The least weight a set is ever given. In the client a set at weight 0 stops writing its blendshapes, which
+        /// then keep their last value: a closed gate left the face frozen instead of at rest. At this weight the shapes
+        /// are still written, at no more than half a percent.
+        /// </summary>
+        const float MinWeight = 0.005f;
+
+        /// <summary>
         /// Gates reach native face tracking through state entry alone. In the client, a Blendshapes Set fed from a
         /// parameter follows it only when the parameter is in Expression Parameters, and never one a blend tree
         /// writes, declared or not, copied by a driver or not. So one layer multiplies each gate's factors into a
@@ -1655,7 +1662,7 @@ namespace Maberikku.FermataNativeFT.Editor
                 descriptor.faceTrackingBlendshapesSetList.Add(new VRCAvatarDescriptor.FaceTrackingBlendshapesSet
                 {
                     setName = gate.Name,
-                    setWeight = Mathf.Clamp01(restDefault * (exact != null ? Default(exact) : 1f)),
+                    setWeight = Mathf.Clamp(restDefault * (exact != null ? Default(exact) : 1f), MinWeight, 1f),
                     faceTrackingBlendshapeNames = Enumerable.Repeat("", (int)VRCAvatarDescriptor.FaceTrackingKey.Max).ToArray(),
                     faceTrackingBlendshapeMultipliers = Enumerable.Repeat(1f, (int)VRCAvatarDescriptor.FaceTrackingKey.Max).ToArray(),
                     visemeBlendshapeNames = Enumerable.Repeat("", (int)VRC_AvatarDescriptor.Viseme.Count).ToArray(),
@@ -1775,12 +1782,12 @@ namespace Maberikku.FermataNativeFT.Editor
                     type = parameter == null ? VRC_AnimatorFaceTrackingBlendshapesSet.SourceType.Value : VRC_AnimatorFaceTrackingBlendshapesSet.SourceType.Parameter,
                     sourceParameter = parameter ?? "",
                     blendshapesSetName = set,
-                    weight = level,
+                    weight = Mathf.Max(MinWeight, level),
                     convertRange = parameter != null,
                     sourceMin = 0f,
                     sourceMax = 1f,
-                    destMin = from,
-                    destMax = to,
+                    destMin = Mathf.Max(MinWeight, from),
+                    destMax = Mathf.Max(MinWeight, to),
                     lerpSpeed = 0f,
                 },
             };
